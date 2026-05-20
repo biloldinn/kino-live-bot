@@ -9,11 +9,6 @@ from telegram.ext import (
     CallbackQueryHandler, ChatMemberHandler
 )
 
-try:
-    from pymongo import MongoClient
-except ImportError:
-    MongoClient = None
-
 # ============= SOZLAMALAR =============
 # Bot tokeningiz
 TOKEN = os.environ.get("BOT_TOKEN", "8679177935:AAHd2tcTrf_P0F7396UJjJXNjVjNkxL6lw0")  
@@ -25,12 +20,6 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 BOT_URL = "https://t.me/kino_livebot"
 
 DATA_FILE = "kino_data.json"
-MONGO_URI = os.environ.get("MONGO_URI")
-
-# MongoDB sozlamalari
-client = MongoClient(MONGO_URI) if (MongoClient and MONGO_URI) else None
-db = client["kino_bot_db"] if client else None
-collection = db["bot_data"] if db else None
 
 # Logging
 logging.basicConfig(
@@ -41,24 +30,12 @@ logger = logging.getLogger(__name__)
 
 # ============= MA'LUMOTLARNI YUKLASH =============
 def load_data():
-    # 1. MongoDB-dan yuklashga urinish
-    if collection:
-        try:
-            doc = collection.find_one({"_id": "main_data"})
-            if doc:
-                logger.info("Ma'lumotlar MongoDB-dan muvaffaqiyatli yuklandi.")
-                return doc["content"]
-        except Exception as e:
-            logger.error(f"MongoDB-dan yuklashda xato: {e}")
-
-    # 2. Local JSON-dan yuklashga urinish (Fallback)
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except:
             pass
-
     return {
         "kinolar": {},
         "guruhlar": [],
@@ -71,24 +48,11 @@ def load_data():
     }
 
 def save_data(data):
-    # 1. MongoDB-ga saqlash (Asosiy)
-    if collection:
-        try:
-            collection.replace_one(
-                {"_id": "main_data"},
-                {"_id": "main_data", "content": data},
-                upsert=True
-            )
-            return
-        except Exception as e:
-            logger.error(f"MongoDB-ga saqlashda xato: {e}")
-
-    # 2. Local JSON-ga saqlash (Fallback)
     try:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"JSON faylga saqlashda xato: {e}")
+        logger.error(f"Faylga saqlashda xato: {e}")
 
 data = load_data()
 data.setdefault("majburiy_kanallar", [])
