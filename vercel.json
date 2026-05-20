@@ -1,0 +1,9 @@
+{
+    "rewrite_dest": "/api/index",
+    "rewrites": [
+        {
+            "source": "/(.*)",
+            "destination": "api/index"
+        }
+    ]
+}

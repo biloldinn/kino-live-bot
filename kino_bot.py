@@ -457,8 +457,8 @@ async def broadcast_movie(context: ContextTypes.DEFAULT_TYPE, kod: str):
             data["guruhlar"].remove(f)
         save_data(data)
 
-# ============= MAIN =============
-async def main():
+# ============= APPLICATION INITIALIZATION =============
+def build_application():
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -472,7 +472,13 @@ async def main():
     # Bot guruhlarga kiritilishini quloqqa olish
     app.add_handler(ChatMemberHandler(track_chats, ChatMemberHandler.MY_CHAT_MEMBER))
     
-    logger.info("Bot ishlashni boshladi...")
+    return app
+
+# ============= MAIN (FOR LOCAL POLLING) =============
+async def main():
+    app = build_application()
+    
+    logger.info("Bot ishlashni boshladi (Polling)...")
     logger.info(f"Admin: {ADMIN_IDS}")
     
     await app.initialize()
