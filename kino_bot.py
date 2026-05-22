@@ -22,7 +22,7 @@ BOT_URL = "https://t.me/kino_livebot"
 DATA_FILE = "kino_data.json"
 # Ma'lumotlarni saqlash kanali IDsi (Persistence uchun)
 # Bu IDni o'zingizning yopiq kanalingiz IDsi bilan almashtiring
-STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-5250577505")
+STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
 
 # Logging
 logging.basicConfig(
