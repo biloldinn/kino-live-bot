@@ -440,39 +440,74 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         return
-        
-    if context.user_data.get("state") == "WAIT_MOVIE":
-        try:
-            # Kinoni darhol storage kanalga yuboramiz (doimiy saqlash uchun)
-            if STORAGE_CHANNEL_ID:
-                status_msg = await update.message.reply_text("📥 Kino saqlash kanaliga yuklanyapti...")
-                
-                # Copy message or forward
-                sent_msg = await context.bot.copy_message(
-                    chat_id=STORAGE_CHANNEL_ID,
-                    from_chat_id=update.message.chat_id,
-                    message_id=update.message.message_id
-                )
-                
-                context.user_data["temp_msg_id"] = sent_msg.message_id
-                context.user_data["temp_chat_id"] = STORAGE_CHANNEL_ID
-                await status_msg.delete()
-            else:
-                # Agar storage kanali yo'q bo'lsa PM-dan foydalanamiz (Xavfli!)
-                context.user_data["temp_msg_id"] = update.message.message_id
-                context.user_data["temp_chat_id"] = update.message.chat_id
-            
-            context.user_data["state"] = "WAIT_DESC"
-            
-            await update.message.reply_text(
-                "✅ Kino qabul qilindi!\n\n"
-                "📝 **Endi ushbu kino uchun qisqa izoh/reklama matnini yuboring:**\n"
-                "(Bu matn foydalanuvchilar kinoni qidirganida videoning tagida ko'rinib turadi)",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Xatolik yuz berdi: {e}")
+
+    # Vercel-da xotira o'chib ketishi sababli, bizga bitta xabarda 
+    # (Video + Caption) ma'lumotlar kelishi eng ishonchli yo'l.
+    
+    caption = update.message.caption
+    if not caption:
+        # Agar caption bo'lmasa, uni WAIT_MOVIE holati deb hisoblaymiz va yo'riqnoma beramiz
+        await update.message.reply_text(
+            "⚠️ **Kino qo'shish tartibi o'zgardi (Vercel uchun):**\n\n"
+            "Kinoni yuborishda uning **izoh (podpis)** qismiga quyidagi formatda yozing:\n"
+            "`Kod / Kino nomi va izohi` \n\n"
+            "**Masalan:** \n"
+            "`123 / O'rgimchak odam (Sarguzasht)`",
+            parse_mode="Markdown"
+        )
         return
+
+    try:
+        # Captionni qismlarga ajratamiz (masalan: "123 / Anaconda")
+        parts = caption.split("/", 1)
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Xato! Format bunday bo'lishi kerak: `Kod / Izoh` \nMasalan: `284 / Anaconda filmi`", parse_mode="Markdown")
+            return
+            
+        kod = parts[0].strip()
+        desc = parts[1].strip()
+        
+        status_msg = await update.message.reply_text("📥 Kino saqlash kanaliga yuklanyapti...")
+        
+        # Kinoni storage kanalga nusxalaymiz
+        if STORAGE_CHANNEL_ID:
+            sent_msg = await context.bot.copy_message(
+                chat_id=STORAGE_CHANNEL_ID,
+                from_chat_id=update.message.chat_id,
+                message_id=update.message.message_id
+            )
+            chat_id_to_store = STORAGE_CHANNEL_ID
+            msg_id_to_store = sent_msg.message_id
+        else:
+            chat_id_to_store = update.message.chat_id
+            msg_id_to_store = update.message.message_id
+            
+        # Bazaga saqlaymiz
+        data["kinolar"][str(kod)] = {
+            "msg_id": msg_id_to_store,
+            "chat_id": chat_id_to_store,
+            "desc": desc
+        }
+        save_data(data)
+        
+        # Backup JSON to telegram
+        await save_data_remote(context)
+        
+        await status_msg.delete()
+        await update.message.reply_text(
+            f"✅ **Kino muvaffaqiyatli saqlandi!**\n\n"
+            f"🔑 Kodi: `{kod}`\n"
+            f"📝 Izoh: {desc}",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+        
+        # Reklama tarqatish
+        await broadcast_movie(context, kod)
+        
+    except Exception as e:
+        logger.error(f"Kino saqlashda xato: {e}")
+        await update.message.reply_text(f"❌ Xatolik yuz berdi: {e}")
 
 # ============= CALLBACK TUGMALARI =============
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
