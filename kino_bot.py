@@ -438,7 +438,7 @@ async def process_movie_request(update: Update, context: ContextTypes.DEFAULT_TY
 # ============= ADMIN QISMI (VIDEO QABUL QILISH) =============
 async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS or update.effective_chat.type != 'private':
+    if user_id not in ADMIN_IDS:
         return
         
     if context.user_data.get("state") == "WAIT_MOVIE":
