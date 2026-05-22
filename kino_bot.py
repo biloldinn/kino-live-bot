@@ -22,6 +22,9 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 BOT_URL = "https://t.me/kino_livebot"
 
 DATA_FILE = "kino_data.json"
+# Ma'lumotlarni saqlash kanali IDsi
+STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
+
 # Vercel KV (Redis) sozlamalari
 KV_URL = os.environ.get("KV_REST_API_URL")
 KV_TOKEN = os.environ.get("KV_REST_API_TOKEN")
