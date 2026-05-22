@@ -389,9 +389,14 @@ async def process_movie_request(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = movie_info["chat_id"] if isinstance(movie_info, dict) else update.effective_chat.id
     kino_desc = movie_info.get("desc", "🎬 Kino") if isinstance(movie_info, dict) else "🎬 Kino"
     
-    status_msg = await context.bot.send_message(chat_id=user_id, text="🔍 Kino yuborilyapti, kutib turing...")
+    status_msg = await context.bot.send_message(chat_id=user_id, text="🔍 Kino qidirilyapti, kutib turing...")
     
-    caption_text = f"{kino_desc}\n\n🔑 Kino kodi: `{kod}`\n\n👇 Kino botimiz orqali hoziroq ko'ring:\n👉 {BOT_URL}"
+    caption_text = (
+        f"🎬 **Kino nomi:** {kino_desc}\n"
+        f"🔑 **Kino kodi:** `{kod}`\n\n"
+        f"👇 Kino botimiz orqali hoziroq ko'ring:\n"
+        f"👉 {BOT_URL}"
+    )
     
     try:
         await context.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id, caption=caption_text, parse_mode="Markdown")
