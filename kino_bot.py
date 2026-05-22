@@ -340,33 +340,43 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ad_text = update.message.text_html # HTML formatida olsa yaxshi
             context.user_data["state"] = None
             
-            await update.message.reply_text("🚀 Reklama tarqatish boshlandi...")
+            await update.message.reply_text("🚀 Reklama tarqatish boshlandi (Guruhlar va Foydalanuvchilar)...")
             
-            success = 0
-            failed = 0
+            success_gr = 0
+            success_usr = 0
+            failed_gr = 0
+            
+            # 1. Guruhlarga yuborish
             failed_ids = []
-            
-            for chat_id in data.get("guruhlar", []):
+            for c_id in data.get("guruhlar", []):
                 try:
-                    await context.bot.send_message(chat_id=int(chat_id), text=ad_text, parse_mode="HTML")
-                    success += 1
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.error(f"Ad broadcast error for {chat_id}: {e}")
-                    failed += 1
-                    failed_ids.append(chat_id)
+                    await context.bot.send_message(chat_id=int(c_id), text=ad_text, parse_mode="HTML")
+                    success_gr += 1
+                    await asyncio.sleep(0.3)
+                except:
+                    failed_gr += 1
+                    failed_ids.append(c_id)
             
-            # Tozalash
+            # Guruhlarni tozalash
             if failed_ids:
                 for f_id in failed_ids:
-                    if f_id in data["guruhlar"]:
-                        data["guruhlar"].remove(f_id)
+                    if f_id in data["guruhlar"]: data["guruhlar"].remove(f_id)
                 save_data(data)
+
+            # 2. Foydalanuvchilarga yuborish
+            for u_id in data.get("foydalanuvchilar", {}):
+                try:
+                    await context.bot.send_message(chat_id=int(u_id), text=ad_text, parse_mode="HTML")
+                    success_usr += 1
+                    await asyncio.sleep(0.05) # Foydalanuvchilar ko'p bo'lishi mumkin
+                except:
+                    pass
                 
             await update.message.reply_text(
-                f"📢 **Reklama natijalari:**\n\n"
-                f"✅ Muvaffaqiyatli: {success} ta guruh\n"
-                f"❌ Muvaffaqiyatsiz: {failed} ta guruh",
+                f"📢 **Reklama yakunlandi:**\n\n"
+                f"👥 Foydalanuvchilar: {success_usr} ta\n"
+                f"🏢 Guruhlar: {success_gr} ta\n"
+                f"❌ Yopilgan guruhlar: {failed_gr} ta",
                 parse_mode="Markdown",
                 reply_markup=get_admin_keyboard()
             )
@@ -416,8 +426,22 @@ async def process_movie_request(update: Update, context: ContextTypes.DEFAULT_TY
         f"👉 {BOT_URL}"
     )
     
+    # Share link yaratish
+    share_url = f"https://t.me/share/url?url={BOT_URL}?start={kod}&text=🎬 {kino_desc} - ushbu kinoni bot orqali ko'ring!"
+    share_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("♻️ Do'stlarga ulashish", url=share_url)]
+    ])
+    
     try:
-        await context.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id, caption=caption_text, parse_mode="Markdown")
+        await context.bot.copy_message(
+            chat_id=user_id, 
+            from_chat_id=chat_id, 
+            message_id=msg_id, 
+            caption=caption_text, 
+            parse_mode="Markdown",
+            protect_content=True, # Forward qilishni taqiqlash
+            reply_markup=share_kb
+        )
         await status_msg.delete()
         
         data["statistika"]["jami_qidiruvlar"] += 1
@@ -597,22 +621,24 @@ async def broadcast_movie(context: ContextTypes.DEFAULT_TYPE, kod: str):
         f"👉 {BOT_URL}?start={kod}"
     )
     
-    # data["guruhlar"] dagi barcha narsaga yuboramiz
-    failed_groups = []
+    # data["guruhlar"] va foydalanuvchilarga yuboramiz
+    message_text += f"\n\n👥 {len(data.get('foydalanuvchilar', {}))} ta foydalanuvchiga yuborilyapti..."
     
+    # Guruhlarga
     for chat_id in data.get("guruhlar", []):
         try:
             await context.bot.send_message(chat_id=int(chat_id), text=message_text, parse_mode="Markdown")
-            await asyncio.sleep(0.5) # Flood wait oldini olish uchun
-        except Exception as e:
-            logger.error(f"{chat_id} guruhiga xabar yetkazilmay qoldi: {e}")
-            failed_groups.append(chat_id)
+            await asyncio.sleep(0.3)
+        except:
+            pass
             
-    # Xato bo'lgan/Botni haydab yuborgan guruhlarni ro'yxatdan tozalash
-    if failed_groups:
-        for f in failed_groups:
-            data["guruhlar"].remove(f)
-        save_data(data)
+    # Foydalanuvchilarga
+    for user_id in data.get("foydalanuvchilar", {}):
+        try:
+            await context.bot.send_message(chat_id=int(user_id), text=message_text, parse_mode="Markdown")
+            await asyncio.sleep(0.05)
+        except:
+            pass
 
 # ============= APPLICATION INITIALIZATION =============
 def build_application():
