@@ -476,13 +476,21 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        # Captiondan kod va izohni ajratib olamiz
-        # Birinchi so'z - kod, qolgani - izoh
-        parts = caption.split(None, 1)
-        kod = parts[0].strip()
-        desc = parts[1].strip() if len(parts) > 1 else "🎬 Ajoyib kino"
+        import re
+        # Captiondan kodi va izohni ajratib olamiz
+        # Avval "ID: 123" yoki "Kod: 123" ko'rinishidagi raqamni qidiramiz
+        match = re.search(r'(?:ID|Kod|Kodi|id|kod|kodi)[:\s]+([\w\d]+)', caption)
         
-        status_msg = await update.message.reply_text("📥 Kino saqlash kanaliga yuklanyapti...")
+        if match:
+            kod = match.group(1).strip()
+            desc = caption.replace(match.group(0), "").strip() # Kod qismini olib tashlaymiz
+        else:
+            # Agar maxsus ID topilmasa, birinchi so'zni kod deb olamiz
+            parts = caption.split(None, 1)
+            kod = parts[0].strip()
+            desc = parts[1].strip() if len(parts) > 1 else "🎬 Ajoyib kino"
+        
+        status_msg = await update.message.reply_text(f"📥 Kino `{kod}` kodi bilan saqlanyapti...")
         
         # Kinoni storage kanalga nusxalaymiz
         if STORAGE_CHANNEL_ID:
