@@ -9,7 +9,7 @@ from telegram.ext import (
     CallbackQueryHandler, ChatMemberHandler
 )
 
-from upstash_redis import Redis
+import requests
 
 # ============= SOZLAMALAR =============
 # Bot tokeningiz
@@ -22,17 +22,38 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 BOT_URL = "https://t.me/kino_livebot"
 
 DATA_FILE = "kino_data.json"
-# Vercel KV (Redis) ulanishi
-# Vercel-da KV_REST_API_URL va KV_REST_API_TOKEN orqali ishlaydi
-kv = None
-if os.environ.get("KV_REST_API_URL") and os.environ.get("KV_REST_API_TOKEN"):
+# Vercel KV (Redis) sozlamalari
+KV_URL = os.environ.get("KV_REST_API_URL")
+KV_TOKEN = os.environ.get("KV_REST_API_TOKEN")
+
+def kv_get(key):
+    if not KV_URL or not KV_TOKEN:
+        return None
     try:
-        kv = Redis.from_env()
-        logger.info("Vercel KV muvaffaqiyatli ulandi.")
+        response = requests.get(
+            f"{KV_URL}/get/{key}",
+            headers={"Authorization": f"Bearer {KV_TOKEN}"}
+        )
+        if response.status_code == 200:
+            res_json = response.json()
+            val = res_json.get("result")
+            return json.loads(val) if val else None
     except Exception as e:
-        logger.warning(f"Vercel KV ga ulanishda xato: {e}")
-else:
-    logger.warning("Vercel KV sozlamalari topilmadi. Lokal rejimda ishlaydi.")
+        logger.error(f"KV Get xato: {e}")
+    return None
+
+def kv_set(key, value):
+    if not KV_URL or not KV_TOKEN:
+        return
+    try:
+        requests.post(
+            f"{KV_URL}/set/{key}",
+            headers={"Authorization": f"Bearer {KV_TOKEN}"},
+            data=json.dumps(value, ensure_ascii=False).encode('utf-8')
+        )
+        logger.info(f"KV Set muvaffaqiyatli: {key}")
+    except Exception as e:
+        logger.error(f"KV Set xato: {e}")
 
 # Logging
 logging.basicConfig(
@@ -44,14 +65,10 @@ logger = logging.getLogger(__name__)
 # ============= MA'LUMOTLARNI YUKLASH =============
 def load_data():
     # 1. Avval Vercel KV dan tekshiramiz
-    if kv:
-        try:
-            cached_data = kv.get("kino_bot_data")
-            if cached_data:
-                logger.info("Ma'lumotlar Vercel KV dan yuklandi.")
-                return cached_data if isinstance(cached_data, dict) else json.loads(cached_data)
-        except Exception as e:
-            logger.error(f"KV dan o'qishda xato: {e}")
+    cached_data = kv_get("kino_bot_data")
+    if cached_data:
+        logger.info("Ma'lumotlar Vercel KV dan yuklandi.")
+        return cached_data
 
     # 2. Agar KV bo'lmasa lokal fayldan tekshiramiz
     if os.path.exists(DATA_FILE):
@@ -78,12 +95,7 @@ def save_data(data):
         logger.error(f"Faylga saqlashda xato: {e}")
 
     # 2. Vercel KV ga saqlash
-    if kv:
-        try:
-            kv.set("kino_bot_data", json.dumps(data, ensure_ascii=False))
-            logger.info("Ma'lumotlar Vercel KV ga saqlandi.")
-        except Exception as e:
-            logger.error(f"KV ga saqlashda xato: {e}")
+    kv_set("kino_bot_data", data)
 
 async def sync_data():
     # Bu funksiya endi kerak emas, lekin xatolik bo'lmasligi uchun bo'sh qoldiramiz
