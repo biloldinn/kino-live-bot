@@ -11,6 +11,8 @@ from telegram.ext import (
 
 import requests
 
+_notified_admin = False
+
 # ============= SOZLAMALAR =============
 # Bot tokeningiz
 TOKEN = os.environ.get("BOT_TOKEN", "8679177935:AAHd2tcTrf_P0F7396UJjJXNjVjNkxL6lw0")  
@@ -101,8 +103,22 @@ def save_data(data):
     kv_set("kino_bot_data", data)
 
 async def sync_data():
-    # Bu funksiya endi kerak emas, lekin xatolik bo'lmasligi uchun bo'sh qoldiramiz
     pass
+
+async def post_init(application: Application) -> None:
+    """Bot yangilanganida adminlarni ogohlantiradi"""
+    global _notified_admin
+    if not _notified_admin:
+        try:
+            for admin_id in ADMIN_IDS:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text="✅ **Loyiha muvaffaqiyatli yangilandi!**\n\nBarcha yangi funksiyalar (Regex Parsing, Sharing, Protection) hozirda faol. Botingiz yangi kod bilan ishlamoqda. 🚀",
+                    parse_mode="Markdown"
+                )
+            _notified_admin = True
+        except:
+            pass
 
 data = load_data()
 data.setdefault("majburiy_kanallar", [])
@@ -651,6 +667,8 @@ async def broadcast_movie(context: ContextTypes.DEFAULT_TYPE, kod: str):
 # ============= APPLICATION INITIALIZATION =============
 def build_application():
     app = Application.builder().token(TOKEN).build()
+    
+    app.post_init = post_init
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
