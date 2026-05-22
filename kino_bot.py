@@ -23,13 +23,16 @@ BOT_URL = "https://t.me/kino_livebot"
 
 DATA_FILE = "kino_data.json"
 # Vercel KV (Redis) ulanishi
-# Vercel-da KV_REST_API_URL va KV_REST_API_TOKEN avtomatik olinadi
-try:
-    kv = Redis.from_env()
-    logger.info("Vercel KV muvaffaqiyatli ulandi.")
-except Exception as e:
-    kv = None
-    logger.warning(f"Vercel KV ulanmadi (Lokal rejim): {e}")
+# Vercel-da KV_REST_API_URL va KV_REST_API_TOKEN orqali ishlaydi
+kv = None
+if os.environ.get("KV_REST_API_URL") and os.environ.get("KV_REST_API_TOKEN"):
+    try:
+        kv = Redis.from_env()
+        logger.info("Vercel KV muvaffaqiyatli ulandi.")
+    except Exception as e:
+        logger.warning(f"Vercel KV ga ulanishda xato: {e}")
+else:
+    logger.warning("Vercel KV sozlamalari topilmadi. Lokal rejimda ishlaydi.")
 
 # Logging
 logging.basicConfig(
