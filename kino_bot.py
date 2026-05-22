@@ -60,6 +60,18 @@ def kv_set(key, value):
     except Exception as e:
         logger.error(f"KV Set xato: {e}")
 
+# ============= DOIMIY HOLATLAR (VERCEL UCHUN) =============
+def get_state(user_id):
+    """Vercel KV dan foydalanuvchi holatini qaytaradi"""
+    state_data = kv_get(f"state_{user_id}")
+    if state_data:
+        return state_data.get("state"), state_data.get("data", {})
+    return None, {}
+
+def set_state(user_id, state, data=None):
+    """Foydalanuvchi holatini Vercel KV ga saqlaydi"""
+    kv_set(f"state_{user_id}", {"state": state, "data": data or {}})
+
 # Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -266,53 +278,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     user = update.effective_user
     text = update.message.text.strip()
-    state = context.user_data.get("state")
+    
+    state, state_data = get_state(user.id)
     
     # ------------------ ADMIN HOLATI (STATE) ------------------
     if user.id in ADMIN_IDS:
-        # KINO QUYISH MATNI (REKLAMA) KUTISH
-        if state == "WAIT_DESC":
-            context.user_data["temp_desc"] = text
-            context.user_data["state"] = "WAIT_CODE"
-            await update.message.reply_text(
-                "✅ Zo'r!\n\n"
-                "✏️ **Endi bu kino uchun maxsus kod kiriting?**\n"
-                "(Istalgan son yoki xarf yuborishingiz mumkin: masalan: `111` yoki `KUZ`):",
-                parse_mode="Markdown"
-            )
-            return
-
-        # KINO QUYISH KODINI KUTISH
-        elif state == "WAIT_CODE":
-            kod = text
-            
-            # datani saqlaymiz:
-            data["kinolar"][str(kod)] = {
-                "msg_id": context.user_data.get("temp_msg_id"),
-                "chat_id": context.user_data.get("temp_chat_id"),
-                "desc": context.user_data.get("temp_desc", "🎬 Ajoyib kino")
-            }
-            save_data(data)
-            
-            # Sync to remote (Removed as KV handles it)
-            
-            await update.message.reply_text(
-                f"✅ Kino saqlandi va backup qilindi!\n"
-                f"🔑 **Kodi:** `{kod}`", 
-                parse_mode="Markdown",
-                reply_markup=get_admin_keyboard()
-            )
-            
-            # --------- REKLAMA TARQATISH ---------
-            await broadcast_movie(context, kod)
-            
-            # State ni yakunlash
-            context.user_data["state"] = None
-            context.user_data["temp_msg_id"] = None
-            return
-            
-        # O'CHIRILADIGAN KODNI KUTISH
-        elif state == "WAIT_DEL_CODE":
+        if state == "WAIT_DEL_CODE":
             kod = text
             if str(kod) in data["kinolar"]:
                 del data["kinolar"][str(kod)]
@@ -320,42 +291,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"🗑 `{kod}` kodli kino o'chirib tashlandi!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
             else:
                 await update.message.reply_text(f"❌ `{kod}` degan kod topilmadi!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
-            context.user_data["state"] = None
-            
-            context.user_data["state"] = None
+            set_state(user.id, None)
             return
 
-        # MAJBURIY KANAL QO'SHISH BOSQICHLARI
         elif state == "WAIT_CH_ID":
-            context.user_data["temp_ch_id"] = text
-            context.user_data["state"] = "WAIT_CH_URL"
+            set_state(user.id, "WAIT_CH_URL", {"temp_ch_id": text})
             await update.message.reply_text("2️⃣ Endi bu kanal uchun Invite Link (Ssilka) yuboring:\n(Masalan: `https://t.me/kino_uz`):")
             return
             
         elif state == "WAIT_CH_URL":
-            context.user_data["temp_ch_url"] = text
-            context.user_data["state"] = "WAIT_CH_NAME"
+            state_data["temp_ch_url"] = text
+            set_state(user.id, "WAIT_CH_NAME", state_data)
             await update.message.reply_text("3️⃣ Foydalanuvchilar obuna bo'lish tugmasida nima deb yozilib tursin?\n(Masalan: `📢 Bosh Kanalimiz`):")
             return
             
         elif state == "WAIT_CH_NAME":
             ch_name = text
             yangi_kanal = {
-                "chat_id": context.user_data.get("temp_ch_id"),
-                "url": context.user_data.get("temp_ch_url"),
+                "chat_id": state_data.get("temp_ch_id"),
+                "url": state_data.get("temp_ch_url"),
                 "name": ch_name
             }
             data["majburiy_kanallar"].append(yangi_kanal)
             save_data(data)
             
             await update.message.reply_text(f"✅ Majburiy kanal saqlandi!\n\nNomi: {ch_name}\nSsilka: {yangi_kanal['url']}\nID: {yangi_kanal['chat_id']}", reply_markup=get_admin_keyboard())
-            context.user_data["state"] = None
+            set_state(user.id, None)
             return
 
-        # REKLAMA MATNINI KUTISH
         elif state == "WAIT_AD_TEXT":
-            ad_text = update.message.text_html # HTML formatida olsa yaxshi
-            context.user_data["state"] = None
+            ad_text = update.message.text_html
+            set_state(user.id, None)
             
             await update.message.reply_text("🚀 Reklama tarqatish boshlandi (Guruhlar va Foydalanuvchilar)...")
             
@@ -363,7 +329,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success_usr = 0
             failed_gr = 0
             
-            # 1. Guruhlarga yuborish
             failed_ids = []
             for c_id in data.get("guruhlar", []):
                 try:
@@ -374,18 +339,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     failed_gr += 1
                     failed_ids.append(c_id)
             
-            # Guruhlarni tozalash
             if failed_ids:
                 for f_id in failed_ids:
                     if f_id in data["guruhlar"]: data["guruhlar"].remove(f_id)
                 save_data(data)
 
-            # 2. Foydalanuvchilarga yuborish
             for u_id in data.get("foydalanuvchilar", {}):
                 try:
                     await context.bot.send_message(chat_id=int(u_id), text=ad_text, parse_mode="HTML")
                     success_usr += 1
-                    await asyncio.sleep(0.05) # Foydalanuvchilar ko'p bo'lishi mumkin
+                    await asyncio.sleep(0.05)
                 except:
                     pass
                 
@@ -403,7 +366,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.get("majburiy_kanallar"):
         is_subscribed = await check_subscription(user.id, context.bot)
         if not is_subscribed:
-            context.user_data["start_kod"] = text
+            set_state(user.id, "WAIT_SUB_FOR_MOVIE", {"start_kod": text})
             await update.message.reply_text(
                 "⚠️ **Kino izlashdan oldin homiy kanallarimizga a'zo bo'ling!**\n\n"
                 "Obuna bo'lgandan so'ng *Tasdiqlash* tugmasini bosishingiz bilanoq so'ragan kinongizni beraman:",
@@ -412,22 +375,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Sync storage channel manually if admin wants (Bonus feature: logic moved to KV)
-    if text == "/sync" and user.id in ADMIN_IDS:
-        data = load_data()
-        await update.message.reply_text("✅ Ma'lumotlar bazadan (KV) yangilandi!")
-        return
-
     await process_movie_request(update, context, text)
 
 # ============= KINO QIDIRISH (CORE LOGIC) =============
-async def process_movie_request(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: str):
+async def process_movie_request(update: Update, context: ContextTypes.DEFAULT_TYPE, search_term: str):
     user_id = update.effective_user.id
     
+    kod = search_term.strip()
     if str(kod) not in data["kinolar"]:
-        await context.bot.send_message(chat_id=user_id, text=f"❌ Kechirasiz!\n`{kod}` raqamli kino xotiradan topilmadi yohud yaqinda o'chirilgan.")
-        return
+        matches = []
+        for k, info in data["kinolar"].items():
+            desc = info.get("desc", "").lower()
+            if kod.lower() in desc:
+                matches.append((k, info.get("desc", "🎬 Kino")))
         
+        if not matches:
+            await context.bot.send_message(chat_id=user_id, text=f"❌ Kechirasiz!\n`{kod}` bo'yicha hech qanday kino topilmadi.")
+            return
+            
+        if len(matches) > 1:
+            result_text = "🔎 **Mana nimalarni topdim:**\n\n"
+            for m_kod, m_name in matches[:10]:
+                result_text += f"🔹 `{m_kod}` - {m_name}\n"
+            result_text += "\nKino kodini yozib yuboring."
+            await context.bot.send_message(chat_id=user_id, text=result_text, parse_mode="Markdown")
+            return
+        else:
+            kod = matches[0][0]
+
     movie_info = data["kinolar"][str(kod)]
     
     msg_id = movie_info["msg_id"] if isinstance(movie_info, dict) else movie_info
@@ -559,21 +534,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data_cb == "check_sub":
         is_subscribed = await check_subscription(user_id, context.bot)
         if is_subscribed == "error":
-            await query.message.reply_text("❌ **UZR XATOLIK!**\n\nBu botga qo'shilgan homiy kanal yoki guruhda botimiz **ADMIN qilib belgilanmagan** yoki Adminlar kanal nomini xato kiritgan!\n\nBot u yerdagi obuna tekshira olmaydi, kanal Adminlari avval xatoni tuzatishi shart!", parse_mode="Markdown")
+            await query.message.reply_text("❌ XATOLIK! Bot kanalga admin qilinmagan.", parse_mode="Markdown")
         elif is_subscribed:
-            kod_kutilayotgan = context.user_data.get("start_kod")
+            # KV dan saqlangan kodni olamiz
+            u_state, u_data = get_state(user_id)
+            kod_kutilayotgan = u_data.get("start_kod")
             if kod_kutilayotgan:
                 await query.message.delete()
                 await process_movie_request(update, context, kod_kutilayotgan)
-                context.user_data["start_kod"] = None
+                set_state(user_id, None)
             else:
                 user = update.effective_user
-                await query.edit_message_text(
-                    f"🎬 **Assalomu alaykum {user.first_name}!**\n\n✅ Obuna tasdiqlandi. Menga to'g'ridan to'g'ri kino kodini kiriting:", 
-                    parse_mode="Markdown"
-                )
+                await query.edit_message_text(f"🎬 **Assalomu alaykum {user.first_name}!**\n\n✅ Tasdiqlandi. Kino kodini yozing:", parse_mode="Markdown")
         else:
-            await query.message.reply_text("❌ Kechirasiz, siz barcha kanallarga to'liq obuna bo'lmadingiz!")
+            await query.message.reply_text("❌ Siz hali obuna bo'lmadingiz!")
             
     # Admin Panel Tugmalari
     elif data_cb.startswith("admin_"):
@@ -581,47 +555,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         if data_cb == "admin_add":
-            context.user_data["state"] = "WAIT_MOVIE"
-            await query.message.reply_text("🎥 Menga kinoni jo'nating (Avval video/fayl ni yuboring):")
+            # Kino qo'shish endi bir bosqichli (Handle Media orqali)
+            await query.message.reply_text("🎥 Videoni uning ostida ID raqami bilan yuboring.\nMasalan: `284 Anaconda` (podpisiga yozing)")
         
         elif data_cb == "admin_del":
-            context.user_data["state"] = "WAIT_DEL_CODE"
-            await query.message.reply_text("🗑 O'chirmoqchi bo'lgan kinongizni MAXSUS KODINI xato qilmasdan yozib yuboring:")
+            set_state(user_id, "WAIT_DEL_CODE")
+            await query.message.reply_text("🗑 O'chirmoqchi bo'lgan kino kodini yozing:")
             
         elif data_cb == "admin_add_ch":
-            context.user_data["state"] = "WAIT_CH_ID"
-            await query.message.reply_text("1️⃣ Majburiy kanal/guruhning ko'rinmas ID raqamini yoki @Username ni kiriting:\n(Masalan: `@kino_uz` yoki `-1001234567890`)")
+            set_state(user_id, "WAIT_CH_ID")
+            await query.message.reply_text("1️⃣ Kanal ID yoki @username kiriting:")
             
         elif data_cb == "admin_del_ch":
             kanallar = data["majburiy_kanallar"]
             if not kanallar:
-                await query.message.reply_text("Hozircha hech qanday majburiy kanal yo'q.", reply_markup=get_admin_keyboard())
+                await query.message.reply_text("Kanal yo'q.", reply_markup=get_admin_keyboard())
                 return
-            keys = []
-            for idx, ch in enumerate(kanallar):
-                keys.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"del_ch_{idx}")])
+            keys = [[InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"del_ch_{idx}")] for idx, ch in enumerate(kanallar)]
             keys.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")])
-            await query.message.reply_text("Qaysi kanalni olib tashlashni tanlang:", reply_markup=InlineKeyboardMarkup(keys))
+            await query.message.reply_text("O'chirish uchun tanlang:", reply_markup=InlineKeyboardMarkup(keys))
         
         elif data_cb == "admin_broadcast":
-            context.user_data["state"] = "WAIT_AD_TEXT"
-            await query.message.reply_text("📝 **Reklama matnini yuboring.**\n\n(Matn HTML formatida bo'lishi mumkin: qalin, og'ma, ssilka va h.k.)")
+            set_state(user_id, "WAIT_AD_TEXT")
+            await query.message.reply_text("📝 Reklama matnini yuboring (HTML mumkin):")
             
         elif data_cb == "admin_stats":
-            stats = data["statistika"]
-            guruh_soni = len(data["guruhlar"])
-            kino_soni = len(data["kinolar"])
+            jami_foydalanuvchilar = len(data.get("foydalanuvchilar", {}))
+            jami_guruhlar = len(data.get("guruhlar", []))
+            jami_kinolar = len(data.get("kinolar", {}))
+            jami_qidiruvlar = data.get("statistika", {}).get("jami_qidiruvlar", 0)
+            
             matn = (
-                f"📊 **Tahlil (Statistika)**\n\n"
-                f"👥 Foydalanuvchilar: {stats['jami_foydalanuvchilar']} ta\n"
-                f"🎬 Bazadagi kinolar: {kino_soni} ta kino\n"
-                f"🔍 Jami qidiruvlar: {stats['jami_qidiruvlar']} marta qidirilgan\n"
-                f"📢 Kuzatuvdagi (Reklama boradigan) tarmoqlar: {guruh_soni} ta guruh/kanal\n"
+                f"📊 **Statistika**\n\n"
+                f"👤 Foydalanuvchilar: {jami_foydalanuvchilar} ta\n"
+                f"🏢 Guruhlar: {jami_guruhlar} ta\n"
+                f"🎬 Kinolar: {jami_kinolar} ta\n"
+                f"🔍 Qidiruvlar: {jami_qidiruvlar} marta\n"
             )
             await query.message.reply_text(matn, parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
         elif data_cb == "admin_back":
-            await query.message.edit_text("👑 **Admin Panelga Xush Kelibsiz!**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+            set_state(user_id, None)
+            await query.message.edit_text("👑 Admin Panel", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
     # Kanal olib tashlash tugmasini bosganda
     elif data_cb.startswith("del_ch_"):
