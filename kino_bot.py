@@ -6,8 +6,9 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes, 
-    CallbackQueryHandler, ChatMemberHandler
+    CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler
 )
+from telegram import InlineQueryResultArticle, InputTextMessageContent
 
 import httpx
 import re
@@ -270,11 +271,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         welcome_text = (
-            f"🎬 **Assalomu alaykum {user.first_name}!**\n\n"
-            f"Botga xush kelibsiz! Kino kodini shu yerga yuborsangiz bot sizga filmni darrov tashlab beradi.\n\n"
-            f"💻 *Turg'unboyev Biloldin* tomonidan maxsus yaratildi!"
+            f"<b>🎬 Assalomu alaykum {user.first_name}!</b>\n\n"
+            f"Botingizga xush kelibsiz! Bu yerda istalgan filmni <b>kod</b> yoki <b>nom</b> orqali topishingiz mumkin.\n\n"
+            f"💡 <i>Kino kodini shu yerga yuboring yoki botimizni istalgan chatda qidirish uchun ishlating!</i>"
         )
-        await update.message.reply_text(welcome_text, parse_mode="Markdown")
+        # Banner bilan yuborish
+        try:
+            banner_url = "https://images.unsplash.com/photo-1485846234645-a62644f84728?q=80&w=2059&auto=format&fit=crop" # Default premium banner
+            await update.message.reply_photo(
+                photo=banner_url,
+                caption=welcome_text,
+                parse_mode="HTML"
+            )
+        except:
+            await update.message.reply_text(welcome_text, parse_mode="HTML")
 
 # ============= XABARLARNI QABUL QILISH (ADMIN VA USER) =============
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -474,18 +484,22 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         import re
-        # Captiondan kodi va izohni ajratib olamiz
-        # Avval "ID: 123" yoki "Kod: 123" ko'rinishidagi raqamni qidiramiz
-        match = re.search(r'(?:ID|Kod|Kodi|id|kod|kodi)[:\s]+([\w\d]+)', caption)
+        # Har qanday formatdagi Kodi: 123 yoki ID: 123 ni ushlash (katta/kichik harflar va bo'shliqlar bilan)
+        match = re.search(r'(?i)(?:id|kod|kodi)\s*[:\-]*\s*([a-z0-9]+)', caption)
         
         if match:
             kod = match.group(1).strip()
             desc = caption.replace(match.group(0), "").strip() # Kod qismini olib tashlaymiz
         else:
-            # Agar maxsus ID topilmasa, birinchi so'zni kod deb olamiz
-            parts = caption.split(None, 1)
-            kod = parts[0].strip()
-            desc = parts[1].strip() if len(parts) > 1 else "🎬 Ajoyib kino"
+            # Agar "kod" yoki "id" kabi so'zlar bo'lmasa, yozuv ichidagi birinchi sonni kod sifatida olamiz
+            num_match = re.search(r'\b(\d{2,10})\b', caption)
+            if num_match:
+                kod = num_match.group(1).strip()
+                desc = caption.replace(kod, "", 1).strip()
+            else:
+                parts = caption.split(None, 1)
+                kod = parts[0].strip()
+                desc = parts[1].strip() if len(parts) > 1 else "🎬 Ajoyib kino"
         
         status_msg = await update.message.reply_text(f"📥 Kino `{kod}` kodi bilan saqlanyapti...")
         
