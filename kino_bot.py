@@ -458,14 +458,11 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        # Captionni qismlarga ajratamiz (masalan: "123 / Anaconda")
-        parts = caption.split("/", 1)
-        if len(parts) < 2:
-            await update.message.reply_text("❌ Xato! Format bunday bo'lishi kerak: `Kod / Izoh` \nMasalan: `284 / Anaconda filmi`", parse_mode="Markdown")
-            return
-            
+        # Captiondan kod va izohni ajratib olamiz
+        # Birinchi so'z - kod, qolgani - izoh
+        parts = caption.split(None, 1)
         kod = parts[0].strip()
-        desc = parts[1].strip()
+        desc = parts[1].strip() if len(parts) > 1 else "🎬 Ajoyib kino"
         
         status_msg = await update.message.reply_text("📥 Kino saqlash kanaliga yuklanyapti...")
         
