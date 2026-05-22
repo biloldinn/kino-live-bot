@@ -284,8 +284,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             save_data(data)
             
+            # Sync to remote
+            await save_data_remote(context)
+            
             await update.message.reply_text(
-                f"✅ Kino bazaga muvaffaqiyatli saqlandi!\n"
+                f"✅ Kino saqlandi va backup qilindi!\n"
                 f"🔑 **Kodi:** `{kod}`", 
                 parse_mode="Markdown",
                 reply_markup=get_admin_keyboard()
@@ -293,9 +296,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # --------- REKLAMA TARQATISH ---------
             await broadcast_movie(context, kod)
-            
-            # Sync to remote
-            await save_data_remote(context)
             
             # State ni yakunlash
             context.user_data["state"] = None
@@ -443,9 +443,24 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     if context.user_data.get("state") == "WAIT_MOVIE":
         try:
-            # Videoning qayerdan kelganini eslab qolamiz
-            context.user_data["temp_msg_id"] = update.message.message_id
-            context.user_data["temp_chat_id"] = update.message.chat_id
+            # Kinoni darhol storage kanalga yuboramiz (doimiy saqlash uchun)
+            if STORAGE_CHANNEL_ID:
+                status_msg = await update.message.reply_text("📥 Kino saqlash kanaliga yuklanyapti...")
+                
+                # Copy message or forward
+                sent_msg = await context.bot.copy_message(
+                    chat_id=STORAGE_CHANNEL_ID,
+                    from_chat_id=update.message.chat_id,
+                    message_id=update.message.message_id
+                )
+                
+                context.user_data["temp_msg_id"] = sent_msg.message_id
+                context.user_data["temp_chat_id"] = STORAGE_CHANNEL_ID
+                await status_msg.delete()
+            else:
+                # Agar storage kanali yo'q bo'lsa PM-dan foydalanamiz (Xavfli!)
+                context.user_data["temp_msg_id"] = update.message.message_id
+                context.user_data["temp_chat_id"] = update.message.chat_id
             
             context.user_data["state"] = "WAIT_DESC"
             
