@@ -9,6 +9,8 @@ from telegram.ext import (
     CallbackQueryHandler, ChatMemberHandler
 )
 
+from upstash_redis import Redis
+
 # ============= SOZLAMALAR =============
 # Bot tokeningiz
 TOKEN = os.environ.get("BOT_TOKEN", "8679177935:AAHd2tcTrf_P0F7396UJjJXNjVjNkxL6lw0")  
@@ -20,9 +22,14 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 BOT_URL = "https://t.me/kino_livebot"
 
 DATA_FILE = "kino_data.json"
-# Ma'lumotlarni saqlash kanali IDsi (Persistence uchun)
-# Bu IDni o'zingizning yopiq kanalingiz IDsi bilan almashtiring
-STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
+# Vercel KV (Redis) ulanishi
+# Vercel-da KV_REST_API_URL va KV_REST_API_TOKEN avtomatik olinadi
+try:
+    kv = Redis.from_env()
+    logger.info("Vercel KV muvaffaqiyatli ulandi.")
+except Exception as e:
+    kv = None
+    logger.warning(f"Vercel KV ulanmadi (Lokal rejim): {e}")
 
 # Logging
 logging.basicConfig(
@@ -33,79 +40,51 @@ logger = logging.getLogger(__name__)
 
 # ============= MA'LUMOTLARNI YUKLASH =============
 def load_data():
+    # 1. Avval Vercel KV dan tekshiramiz
+    if kv:
+        try:
+            cached_data = kv.get("kino_bot_data")
+            if cached_data:
+                logger.info("Ma'lumotlar Vercel KV dan yuklandi.")
+                return cached_data if isinstance(cached_data, dict) else json.loads(cached_data)
+        except Exception as e:
+            logger.error(f"KV dan o'qishda xato: {e}")
+
+    # 2. Agar KV bo'lmasa lokal fayldan tekshiramiz
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except:
             pass
+    
     return {
         "kinolar": {},
         "guruhlar": [],
         "foydalanuvchilar": {},
-        "statistika": {
-            "jami_qidiruvlar": 0,
-            "jami_foydalanuvchilar": 0
-        },
+        "statistika": {"jami_qidiruvlar": 0, "jami_foydalanuvchilar": 0},
         "majburiy_kanallar": []
     }
 
 def save_data(data):
+    # 1. Lokal faylga saqlash
     try:
-        # Avval mahalliy faylga saqlaymiz
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        # Agar STORAGE_CHANNEL_ID bor bo'lsa, Telegramga ham yuklaymiz
-        # Eslatma: save_data sinxron funksiya, lekin telegramga yuklash uchun 
-        # bizga event loop kerak bo'lishi mumkin. 
-        # Shuning uchun bu yerda faqat log qilamiz, asl yuklashni esa 
-        # async bo'lgan save_data_async orqali bajaramiz.
     except Exception as e:
         logger.error(f"Faylga saqlashda xato: {e}")
 
-async def save_data_remote(context: ContextTypes.DEFAULT_TYPE):
-    """Ma'lumotlarni Telegram kanalga backup qilib qo'yadi va pinned qilib qo'yadi"""
-    if not STORAGE_CHANNEL_ID:
-        return
-    
-    try:
-        with open(DATA_FILE, 'rb') as f:
-            msg = await context.bot.send_document(
-                chat_id=STORAGE_CHANNEL_ID,
-                document=f,
-                filename=DATA_FILE,
-                caption=f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            # Eng oxirgi backupni pin qilib qo'yamiz
-            await context.bot.pin_chat_message(chat_id=STORAGE_CHANNEL_ID, message_id=msg.message_id)
-        logger.info("Ma'lumotlar Telegramga backup qilindi va pinlandi.")
-    except Exception as e:
-        logger.error(f"Telegramga backup yuklashda xato: {e}")
+    # 2. Vercel KV ga saqlash
+    if kv:
+        try:
+            kv.set("kino_bot_data", json.dumps(data, ensure_ascii=False))
+            logger.info("Ma'lumotlar Vercel KV ga saqlandi.")
+        except Exception as e:
+            logger.error(f"KV ga saqlashda xato: {e}")
 
-async def load_data_from_telegram(bot):
-    """Boshlanishida Telegram kanaldan eng oxirgi backupni yuklab oladi"""
-    if not STORAGE_CHANNEL_ID:
-        return load_data()
-    
-    try:
-        # Kanaldagi pinned xabarni tekshiramiz
-        chat = await bot.get_chat(STORAGE_CHANNEL_ID)
-        if chat.pinned_message and chat.pinned_message.document:
-            file_id = chat.pinned_message.document.file_id
-            new_file = await bot.get_file(file_id)
-            await new_file.download_to_drive(DATA_FILE)
-            logger.info("Eng oxirgi ma'lumotlar Telegramdan yuklab olindi.")
-            
-            # Faylni o'qib memoryga yuklaymiz
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                global data
-                data = json.load(f)
-                return data
-    except Exception as e:
-        logger.error(f"Telegramdan ma'lumotlarni yuklashda xato: {e}")
-    
-    return load_data()
+async def sync_data():
+    # Bu funksiya endi kerak emas, lekin xatolik bo'lmasligi uchun bo'sh qoldiramiz
+    pass
 
 data = load_data()
 data.setdefault("majburiy_kanallar", [])
@@ -114,10 +93,6 @@ data.setdefault("guruhlar", [])
 data.setdefault("foydalanuvchilar", {})
 if "statistika" not in data:
     data["statistika"] = {"jami_qidiruvlar": 0, "jami_foydalanuvchilar": 0}
-
-async def post_init(application: Application) -> None:
-    """Bot ishga tushishidan oldin ma'lumotlarni yuklaydi"""
-    await load_data_from_telegram(application.bot)
 
 # ============= YORDAMCHI FUNKSIYALAR =============
 def register_user(user_id, username, first_name):
@@ -284,8 +259,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             save_data(data)
             
-            # Sync to remote
-            await save_data_remote(context)
+            # Sync to remote (Removed as KV handles it)
             
             await update.message.reply_text(
                 f"✅ Kino saqlandi va backup qilindi!\n"
@@ -313,8 +287,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ `{kod}` degan kod topilmadi!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
             context.user_data["state"] = None
             
-            # Sync to remote
-            await save_data_remote(context)
+            context.user_data["state"] = None
             return
 
         # MAJBURIY KANAL QO'SHISH BOSQICHLARI
@@ -342,7 +315,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(f"✅ Majburiy kanal saqlandi!\n\nNomi: {ch_name}\nSsilka: {yangi_kanal['url']}\nID: {yangi_kanal['chat_id']}", reply_markup=get_admin_keyboard())
             context.user_data["state"] = None
-            await save_data_remote(context)
             return
 
         # REKLAMA MATNINI KUTISH
@@ -372,7 +344,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if f_id in data["guruhlar"]:
                         data["guruhlar"].remove(f_id)
                 save_data(data)
-                await save_data_remote(context)
                 
             await update.message.reply_text(
                 f"📢 **Reklama natijalari:**\n\n"
@@ -396,10 +367,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Sync storage channel manually if admin wants (Bonus feature)
+    # Sync storage channel manually if admin wants (Bonus feature: logic moved to KV)
     if text == "/sync" and user.id in ADMIN_IDS:
-        await load_data_from_telegram(context.bot)
-        await update.message.reply_text("✅ Ma'lumotlar bazadan yangilandi!")
+        data = load_data()
+        await update.message.reply_text("✅ Ma'lumotlar bazadan (KV) yangilandi!")
         return
 
     await process_movie_request(update, context, text)
@@ -487,8 +458,7 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         }
         save_data(data)
         
-        # Backup JSON to telegram
-        await save_data_remote(context)
+        # Backup JSON to telegram (Removed as KV handles it)
         
         await status_msg.delete()
         await update.message.reply_text(
@@ -620,13 +590,10 @@ async def broadcast_movie(context: ContextTypes.DEFAULT_TYPE, kod: str):
         for f in failed_groups:
             data["guruhlar"].remove(f)
         save_data(data)
-        await save_data_remote(context)
 
 # ============= APPLICATION INITIALIZATION =============
 def build_application():
     app = Application.builder().token(TOKEN).build()
-    
-    app.post_init = post_init
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
