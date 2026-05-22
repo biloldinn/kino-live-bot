@@ -25,6 +25,9 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 # Sizning botingiz manzili (Reklama uchun)
 BOT_URL = "https://t.me/kino_livebot"
 
+DATA_FILE = "kino_data.json"
+STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
+
 # Vercel KV (Redis) sozlamalari
 KV_URL = os.environ.get("KV_REST_API_URL")
 KV_TOKEN = os.environ.get("KV_REST_API_TOKEN")
@@ -220,14 +223,14 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if new_status in [ChatMember.ADMINISTRATOR, ChatMember.MEMBER]:
             if chat_id not in data["guruhlar"]:
                 data["guruhlar"].append(chat_id)
-                save_data(data)
+                await save_data(data)
                 logger.info(f"Bot yangi chat/kanalga qo'shildi: {chat_id}")
                 
         # Chiqib ketdi yoki tepildi
         elif new_status in [ChatMember.LEFT, ChatMember.KICKED, ChatMember.RESTRICTED]:
             if chat_id in data["guruhlar"]:
                 data["guruhlar"].remove(chat_id)
-                save_data(data)
+                await save_data(data)
                 logger.info(f"Bot chat/kanaldan o'chirildi: {chat_id}")
 
 # ============= START VA KOD BILAN KIRISH =============
@@ -294,7 +297,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip()
     
-    state, state_data = get_state(user.id)
+    state, state_data = await get_state(user.id)
     
     # ------------------ ADMIN HOLATI (STATE) ------------------
     if user.id in ADMIN_IDS:
@@ -302,21 +305,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kod = text
             if str(kod) in data["kinolar"]:
                 del data["kinolar"][str(kod)]
-                save_data(data)
+                await save_data(data)
                 await update.message.reply_text(f"🗑 `{kod}` kodli kino o'chirib tashlandi!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
             else:
                 await update.message.reply_text(f"❌ `{kod}` degan kod topilmadi!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
-            set_state(user.id, None)
+            await set_state(user.id, None)
             return
 
         elif state == "WAIT_CH_ID":
-            set_state(user.id, "WAIT_CH_URL", {"temp_ch_id": text})
+            await set_state(user.id, "WAIT_CH_URL", {"temp_ch_id": text})
             await update.message.reply_text("2️⃣ Endi bu kanal uchun Invite Link (Ssilka) yuboring:\n(Masalan: `https://t.me/kino_uz`):")
             return
             
         elif state == "WAIT_CH_URL":
             state_data["temp_ch_url"] = text
-            set_state(user.id, "WAIT_CH_NAME", state_data)
+            await set_state(user.id, "WAIT_CH_NAME", state_data)
             await update.message.reply_text("3️⃣ Foydalanuvchilar obuna bo'lish tugmasida nima deb yozilib tursin?\n(Masalan: `📢 Bosh Kanalimiz`):")
             return
             
@@ -328,15 +331,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "name": ch_name
             }
             data["majburiy_kanallar"].append(yangi_kanal)
-            save_data(data)
+            await save_data(data)
             
             await update.message.reply_text(f"✅ Majburiy kanal saqlandi!\n\nNomi: {ch_name}\nSsilka: {yangi_kanal['url']}\nID: {yangi_kanal['chat_id']}", reply_markup=get_admin_keyboard())
-            set_state(user.id, None)
+            await set_state(user.id, None)
             return
 
         elif state == "WAIT_AD_TEXT":
             ad_text = update.message.text_html
-            set_state(user.id, None)
+            await set_state(user.id, None)
             
             await update.message.reply_text("🚀 Reklama tarqatish boshlandi (Guruhlar va Foydalanuvchilar)...")
             
@@ -357,7 +360,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if failed_ids:
                 for f_id in failed_ids:
                     if f_id in data["guruhlar"]: data["guruhlar"].remove(f_id)
-                save_data(data)
+                await save_data(data)
 
             for u_id in data.get("foydalanuvchilar", {}):
                 try:
@@ -381,7 +384,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.get("majburiy_kanallar"):
         is_subscribed = await check_subscription(user.id, context.bot)
         if not is_subscribed:
-            set_state(user.id, "WAIT_SUB_FOR_MOVIE", {"start_kod": text})
+            await set_state(user.id, "WAIT_SUB_FOR_MOVIE", {"start_kod": text})
             await update.message.reply_text(
                 "⚠️ **Kino izlashdan oldin homiy kanallarimizga a'zo bo'ling!**\n\n"
                 "Obuna bo'lgandan so'ng *Tasdiqlash* tugmasini bosishingiz bilanoq so'ragan kinongizni beraman:",
@@ -455,7 +458,7 @@ async def process_movie_request(update: Update, context: ContextTypes.DEFAULT_TY
         str_uid = str(user_id)
         if str_uid in data["foydalanuvchilar"]:
             data["foydalanuvchilar"][str_uid]["qidiruvlar"] += 1
-        save_data(data)
+        await save_data(data)
     except Exception as e:
         logger.error(f"Copy message xildi: {e}")
         await status_msg.edit_text(f"❌ Xatolik!\nKino baza kanalidan (Yopiq kanaldan) butunlay o'chirib yuborilgan ko'rinadi.")
@@ -522,7 +525,7 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "chat_id": chat_id_to_store,
             "desc": desc
         }
-        save_data(data)
+        await save_data(data)
         
         # Backup JSON to telegram (Removed as KV handles it)
         
@@ -556,12 +559,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ XATOLIK! Bot kanalga admin qilinmagan.", parse_mode="Markdown")
         elif is_subscribed:
             # KV dan saqlangan kodni olamiz
-            u_state, u_data = get_state(user_id)
+            u_state, u_data = await get_state(user_id)
             kod_kutilayotgan = u_data.get("start_kod")
             if kod_kutilayotgan:
                 await query.message.delete()
                 await process_movie_request(update, context, kod_kutilayotgan)
-                set_state(user_id, None)
+                await set_state(user_id, None)
             else:
                 user = update.effective_user
                 await query.edit_message_text(f"🎬 **Assalomu alaykum {user.first_name}!**\n\n✅ Tasdiqlandi. Kino kodini yozing:", parse_mode="Markdown")
@@ -578,11 +581,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("🎥 Videoni uning ostida ID raqami bilan yuboring.\nMasalan: `284 Anaconda` (podpisiga yozing)")
         
         elif data_cb == "admin_del":
-            set_state(user_id, "WAIT_DEL_CODE")
+            await set_state(user_id, "WAIT_DEL_CODE")
             await query.message.reply_text("🗑 O'chirmoqchi bo'lgan kino kodini yozing:")
             
         elif data_cb == "admin_add_ch":
-            set_state(user_id, "WAIT_CH_ID")
+            await set_state(user_id, "WAIT_CH_ID")
             await query.message.reply_text("1️⃣ Kanal ID yoki @username kiriting:")
             
         elif data_cb == "admin_del_ch":
@@ -595,7 +598,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("O'chirish uchun tanlang:", reply_markup=InlineKeyboardMarkup(keys))
         
         elif data_cb == "admin_broadcast":
-            set_state(user_id, "WAIT_AD_TEXT")
+            await set_state(user_id, "WAIT_AD_TEXT")
             await query.message.reply_text("📝 Reklama matnini yuboring (HTML mumkin):")
             
         elif data_cb == "admin_stats":
@@ -614,7 +617,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(matn, parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
         elif data_cb == "admin_back":
-            set_state(user_id, None)
+            await set_state(user_id, None)
             await query.message.edit_text("👑 Admin Panel", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
     # Kanal olib tashlash tugmasini bosganda
@@ -624,7 +627,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(data_cb.split("_")[2])
         if 0 <= idx < len(data["majburiy_kanallar"]):
             olingan = data["majburiy_kanallar"].pop(idx)
-            save_data(data)
+            await save_data(data)
             await query.message.edit_text(f"✅ **{olingan['name']}** obunalar safidan o'chirildi!", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ============= GURUHLARGA REKLAMA TARQATISH =============
