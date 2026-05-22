@@ -9,7 +9,8 @@ from telegram.ext import (
     CallbackQueryHandler, ChatMemberHandler
 )
 
-import requests
+import httpx
+import re
 
 _notified_admin = False
 
@@ -23,54 +24,56 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 # Sizning botingiz manzili (Reklama uchun)
 BOT_URL = "https://t.me/kino_livebot"
 
-DATA_FILE = "kino_data.json"
-# Ma'lumotlarni saqlash kanali IDsi
-STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
-
 # Vercel KV (Redis) sozlamalari
 KV_URL = os.environ.get("KV_REST_API_URL")
 KV_TOKEN = os.environ.get("KV_REST_API_TOKEN")
 
-def kv_get(key):
+async def kv_get(key):
+    """Asinxron KV ma'lumot olish"""
     if not KV_URL or not KV_TOKEN:
         return None
     try:
-        response = requests.get(
-            f"{KV_URL}/get/{key}",
-            headers={"Authorization": f"Bearer {KV_TOKEN}"}
-        )
-        if response.status_code == 200:
-            res_json = response.json()
-            val = res_json.get("result")
-            return json.loads(val) if val else None
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{KV_URL}/get/{key}",
+                headers={"Authorization": f"Bearer {KV_TOKEN}"},
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                res_json = response.json()
+                val = res_json.get("result")
+                return json.loads(val) if val else None
     except Exception as e:
         logger.error(f"KV Get xato: {e}")
     return None
 
-def kv_set(key, value):
+async def kv_set(key, value):
+    """Asinxron KV ma'lumot saqlash"""
     if not KV_URL or not KV_TOKEN:
         return
     try:
-        requests.post(
-            f"{KV_URL}/set/{key}",
-            headers={"Authorization": f"Bearer {KV_TOKEN}"},
-            data=json.dumps(value, ensure_ascii=False).encode('utf-8')
-        )
-        logger.info(f"KV Set muvaffaqiyatli: {key}")
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{KV_URL}/set/{key}",
+                headers={"Authorization": f"Bearer {KV_TOKEN}"},
+                content=json.dumps(value, ensure_ascii=False).encode('utf-8'),
+                timeout=10.0
+            )
+            logger.info(f"KV Set muvaffaqiyatli: {key}")
     except Exception as e:
         logger.error(f"KV Set xato: {e}")
 
 # ============= DOIMIY HOLATLAR (VERCEL UCHUN) =============
-def get_state(user_id):
+async def get_state(user_id):
     """Vercel KV dan foydalanuvchi holatini qaytaradi"""
-    state_data = kv_get(f"state_{user_id}")
+    state_data = await kv_get(f"state_{user_id}")
     if state_data:
         return state_data.get("state"), state_data.get("data", {})
     return None, {}
 
-def set_state(user_id, state, data=None):
+async def set_state(user_id, state, data=None):
     """Foydalanuvchi holatini Vercel KV ga saqlaydi"""
-    kv_set(f"state_{user_id}", {"state": state, "data": data or {}})
+    await kv_set(f"state_{user_id}", {"state": state, "data": data or {}})
 
 # Logging
 logging.basicConfig(
@@ -80,9 +83,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============= MA'LUMOTLARNI YUKLASH =============
-def load_data():
+async def load_data():
     # 1. Avval Vercel KV dan tekshiramiz
-    cached_data = kv_get("kino_bot_data")
+    cached_data = await kv_get("kino_bot_data")
     if cached_data:
         logger.info("Ma'lumotlar Vercel KV dan yuklandi.")
         return cached_data
@@ -103,7 +106,7 @@ def load_data():
         "majburiy_kanallar": []
     }
 
-def save_data(data):
+async def save_data(data):
     # 1. Lokal faylga saqlash
     try:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -112,37 +115,40 @@ def save_data(data):
         logger.error(f"Faylga saqlashda xato: {e}")
 
     # 2. Vercel KV ga saqlash
-    kv_set("kino_bot_data", data)
+    await kv_set("kino_bot_data", data)
 
-async def sync_data():
-    pass
+data = {
+    "kinolar": {},
+    "guruhlar": [],
+    "foydalanuvchilar": {},
+    "statistika": {"jami_qidiruvlar": 0, "jami_foydalanuvchilar": 0},
+    "majburiy_kanallar": []
+}
 
 async def post_init(application: Application) -> None:
-    """Bot yangilanganida adminlarni ogohlantiradi"""
-    global _notified_admin
+    """Bot yangilanganida adminlarni ogohlantiradi va ma'lumotlarni yuklaydi"""
+    global _notified_admin, data
+    
+    # Ma'lumotlarni yuklaymiz
+    loaded = await load_data()
+    if loaded:
+        data.update(loaded)
+        data.setdefault("majburiy_kanallar", [])
+        logger.info("Ma'lumotlar global o'zgaruvchiga yuklandi.")
+
     if not _notified_admin:
-        _notified_admin = True # Darhol True qilamizki, spam bo'lmasin
+        _notified_admin = True
         for admin_id in ADMIN_IDS:
             try:
-                # Vercel-da xabar yuborishni kutib o'tirmaslik uchun backgroundda yuboramiz
                 asyncio.create_task(application.bot.send_message(
                     chat_id=int(admin_id),
-                    text="✅ **Loyiha muvaffaqiyatli yangilandi!**\n\nBarcha yangi funksiyalar hozirda faol. Botingiz yangi kod bilan ishlamoqda. 🚀",
+                    text="✅ **Loyiha muvaffaqiyatli yangilandi!**\n\nBarcha yangi funksiyalar (Asinxron KV, Regex, Sharing) faol. 🚀",
                     parse_mode="Markdown"
                 ))
-            except:
-                pass
-
-data = load_data()
-data.setdefault("majburiy_kanallar", [])
-data.setdefault("kinolar", {})
-data.setdefault("guruhlar", [])
-data.setdefault("foydalanuvchilar", {})
-if "statistika" not in data:
-    data["statistika"] = {"jami_qidiruvlar": 0, "jami_foydalanuvchilar": 0}
+            except: pass
 
 # ============= YORDAMCHI FUNKSIYALAR =============
-def register_user(user_id, username, first_name):
+async def register_user(user_id, username, first_name):
     user_id_str = str(user_id)
     if user_id_str not in data["foydalanuvchilar"]:
         data["foydalanuvchilar"][user_id_str] = {
@@ -151,8 +157,7 @@ def register_user(user_id, username, first_name):
             "qidiruvlar": 0,
             "qoshilgan_vaqt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        data["statistika"]["jami_foydalanuvchilar"] += 1
-        save_data(data)
+        await save_data(data)
 
 # ============= OBUNA TEKSHIRISH =============
 async def check_subscription(user_id, bot):
@@ -227,7 +232,7 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============= START VA KOD BILAN KIRISH =============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    register_user(user.id, user.username, user.first_name)
+    await register_user(user.id, user.username, user.first_name)
     
     # Gruppalarda start komandasiga bot javob bermasligi yaxshiroq
     if update.effective_chat.type != 'private':
