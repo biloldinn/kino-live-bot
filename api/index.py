@@ -23,6 +23,11 @@ async def webhook_handler(request: Request):
         
         # Application context orqali update-ni qayta ishlaymiz
         async with ptb_app:
+            # post_init ni qo'lda chaqiramiz chunki serverlessda u avtomatik bo'lmasligi mumkin
+            if not hasattr(ptb_app, "_initialized_data"):
+                await ptb_app.post_init(ptb_app)
+                ptb_app._initialized_data = True
+                
             await ptb_app.process_update(update)
             
         return {"status": "ok"}

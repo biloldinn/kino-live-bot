@@ -20,6 +20,9 @@ ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7985206085").split("
 BOT_URL = "https://t.me/kino_livebot"
 
 DATA_FILE = "kino_data.json"
+# Ma'lumotlarni saqlash kanali IDsi (Persistence uchun)
+# Bu IDni o'zingizning yopiq kanalingiz IDsi bilan almashtiring
+STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-5250577505")
 
 # Logging
 logging.basicConfig(
@@ -49,10 +52,60 @@ def load_data():
 
 def save_data(data):
     try:
+        # Avval mahalliy faylga saqlaymiz
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        # Agar STORAGE_CHANNEL_ID bor bo'lsa, Telegramga ham yuklaymiz
+        # Eslatma: save_data sinxron funksiya, lekin telegramga yuklash uchun 
+        # bizga event loop kerak bo'lishi mumkin. 
+        # Shuning uchun bu yerda faqat log qilamiz, asl yuklashni esa 
+        # async bo'lgan save_data_async orqali bajaramiz.
     except Exception as e:
         logger.error(f"Faylga saqlashda xato: {e}")
+
+async def save_data_remote(context: ContextTypes.DEFAULT_TYPE):
+    """Ma'lumotlarni Telegram kanalga backup qilib qo'yadi va pinned qilib qo'yadi"""
+    if not STORAGE_CHANNEL_ID:
+        return
+    
+    try:
+        with open(DATA_FILE, 'rb') as f:
+            msg = await context.bot.send_document(
+                chat_id=STORAGE_CHANNEL_ID,
+                document=f,
+                filename=DATA_FILE,
+                caption=f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            # Eng oxirgi backupni pin qilib qo'yamiz
+            await context.bot.pin_chat_message(chat_id=STORAGE_CHANNEL_ID, message_id=msg.message_id)
+        logger.info("Ma'lumotlar Telegramga backup qilindi va pinlandi.")
+    except Exception as e:
+        logger.error(f"Telegramga backup yuklashda xato: {e}")
+
+async def load_data_from_telegram(bot):
+    """Boshlanishida Telegram kanaldan eng oxirgi backupni yuklab oladi"""
+    if not STORAGE_CHANNEL_ID:
+        return load_data()
+    
+    try:
+        # Kanaldagi pinned xabarni tekshiramiz
+        chat = await bot.get_chat(STORAGE_CHANNEL_ID)
+        if chat.pinned_message and chat.pinned_message.document:
+            file_id = chat.pinned_message.document.file_id
+            new_file = await bot.get_file(file_id)
+            await new_file.download_to_drive(DATA_FILE)
+            logger.info("Eng oxirgi ma'lumotlar Telegramdan yuklab olindi.")
+            
+            # Faylni o'qib memoryga yuklaymiz
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                global data
+                data = json.load(f)
+                return data
+    except Exception as e:
+        logger.error(f"Telegramdan ma'lumotlarni yuklashda xato: {e}")
+    
+    return load_data()
 
 data = load_data()
 data.setdefault("majburiy_kanallar", [])
@@ -61,6 +114,10 @@ data.setdefault("guruhlar", [])
 data.setdefault("foydalanuvchilar", {})
 if "statistika" not in data:
     data["statistika"] = {"jami_qidiruvlar": 0, "jami_foydalanuvchilar": 0}
+
+async def post_init(application: Application) -> None:
+    """Bot ishga tushishidan oldin ma'lumotlarni yuklaydi"""
+    await load_data_from_telegram(application.bot)
 
 # ============= YORDAMCHI FUNKSIYALAR =============
 def register_user(user_id, username, first_name):
@@ -111,6 +168,7 @@ def get_admin_keyboard():
         [InlineKeyboardButton("🗑 Kino O'chirish", callback_data="admin_del")],
         [InlineKeyboardButton("🔗 Majburiy kanal qo'shish", callback_data="admin_add_ch")],
         [InlineKeyboardButton("🗑 Majburiy kanal o'chirish", callback_data="admin_del_ch")],
+        [InlineKeyboardButton("📢 Reklama Tarqatish", callback_data="admin_broadcast")],
         [InlineKeyboardButton("📊 Tahlil Qilish", callback_data="admin_stats")]
     ])
 
@@ -236,6 +294,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # --------- REKLAMA TARQATISH ---------
             await broadcast_movie(context, kod)
             
+            # Sync to remote
+            await save_data_remote(context)
+            
             # State ni yakunlash
             context.user_data["state"] = None
             context.user_data["temp_msg_id"] = None
@@ -251,6 +312,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(f"❌ `{kod}` degan kod topilmadi!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
             context.user_data["state"] = None
+            
+            # Sync to remote
+            await save_data_remote(context)
             return
 
         # MAJBURIY KANAL QO'SHISH BOSQICHLARI
@@ -278,6 +342,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(f"✅ Majburiy kanal saqlandi!\n\nNomi: {ch_name}\nSsilka: {yangi_kanal['url']}\nID: {yangi_kanal['chat_id']}", reply_markup=get_admin_keyboard())
             context.user_data["state"] = None
+            await save_data_remote(context)
+            return
+
+        # REKLAMA MATNINI KUTISH
+        elif state == "WAIT_AD_TEXT":
+            ad_text = update.message.text_html # HTML formatida olsa yaxshi
+            context.user_data["state"] = None
+            
+            await update.message.reply_text("🚀 Reklama tarqatish boshlandi...")
+            
+            success = 0
+            failed = 0
+            failed_ids = []
+            
+            for chat_id in data.get("guruhlar", []):
+                try:
+                    await context.bot.send_message(chat_id=int(chat_id), text=ad_text, parse_mode="HTML")
+                    success += 1
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Ad broadcast error for {chat_id}: {e}")
+                    failed += 1
+                    failed_ids.append(chat_id)
+            
+            # Tozalash
+            if failed_ids:
+                for f_id in failed_ids:
+                    if f_id in data["guruhlar"]:
+                        data["guruhlar"].remove(f_id)
+                save_data(data)
+                await save_data_remote(context)
+                
+            await update.message.reply_text(
+                f"📢 **Reklama natijalari:**\n\n"
+                f"✅ Muvaffaqiyatli: {success} ta guruh\n"
+                f"❌ Muvaffaqiyatsiz: {failed} ta guruh",
+                parse_mode="Markdown",
+                reply_markup=get_admin_keyboard()
+            )
             return
 
     # ------------------ ODDY FOYDALANUVCHI (KINO QIDIRISH) ------------------
@@ -292,6 +395,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             return
+
+    # Sync storage channel manually if admin wants (Bonus feature)
+    if text == "/sync" and user.id in ADMIN_IDS:
+        await load_data_from_telegram(context.bot)
+        await update.message.reply_text("✅ Ma'lumotlar bazadan yangilandi!")
+        return
 
     await process_movie_request(update, context, text)
 
@@ -404,6 +513,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keys.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"del_ch_{idx}")])
             keys.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")])
             await query.message.reply_text("Qaysi kanalni olib tashlashni tanlang:", reply_markup=InlineKeyboardMarkup(keys))
+        
+        elif data_cb == "admin_broadcast":
+            context.user_data["state"] = "WAIT_AD_TEXT"
+            await query.message.reply_text("📝 **Reklama matnini yuboring.**\n\n(Matn HTML formatida bo'lishi mumkin: qalin, og'ma, ssilka va h.k.)")
             
         elif data_cb == "admin_stats":
             stats = data["statistika"]
@@ -460,10 +573,13 @@ async def broadcast_movie(context: ContextTypes.DEFAULT_TYPE, kod: str):
         for f in failed_groups:
             data["guruhlar"].remove(f)
         save_data(data)
+        await save_data_remote(context)
 
 # ============= APPLICATION INITIALIZATION =============
 def build_application():
     app = Application.builder().token(TOKEN).build()
+    
+    app.post_init = post_init
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
