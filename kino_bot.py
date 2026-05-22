@@ -109,16 +109,17 @@ async def post_init(application: Application) -> None:
     """Bot yangilanganida adminlarni ogohlantiradi"""
     global _notified_admin
     if not _notified_admin:
-        try:
-            for admin_id in ADMIN_IDS:
-                await application.bot.send_message(
-                    chat_id=admin_id,
-                    text="✅ **Loyiha muvaffaqiyatli yangilandi!**\n\nBarcha yangi funksiyalar (Regex Parsing, Sharing, Protection) hozirda faol. Botingiz yangi kod bilan ishlamoqda. 🚀",
+        _notified_admin = True # Darhol True qilamizki, spam bo'lmasin
+        for admin_id in ADMIN_IDS:
+            try:
+                # Vercel-da xabar yuborishni kutib o'tirmaslik uchun backgroundda yuboramiz
+                asyncio.create_task(application.bot.send_message(
+                    chat_id=int(admin_id),
+                    text="✅ **Loyiha muvaffaqiyatli yangilandi!**\n\nBarcha yangi funksiyalar hozirda faol. Botingiz yangi kod bilan ishlamoqda. 🚀",
                     parse_mode="Markdown"
-                )
-            _notified_admin = True
-        except:
-            pass
+                ))
+            except:
+                pass
 
 data = load_data()
 data.setdefault("majburiy_kanallar", [])
