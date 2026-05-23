@@ -30,8 +30,14 @@ STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
 
 # MongoDB
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://bilol006:bilol006@cluster0.y0pbpop.mongodb.net/?appName=Cluster0")
+
+# SSL/TLS xatoliklarini oldini olish uchun parametrlar qo'shamiz
+if "tls=" not in MONGO_URL.lower():
+    separator = "&" if "?" in MONGO_URL else "?"
+    MONGO_URL += f"{separator}tls=true&tlsAllowInvalidCertificates=true&retryWrites=true&w=majority"
+
 from motor.motor_asyncio import AsyncIOMotorClient
-db_client = AsyncIOMotorClient(MONGO_URL)
+db_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
 db = db_client["kino_bot_db"]
 movies_col = db["movies"]
 users_col = db["users"]
@@ -137,10 +143,20 @@ async def post_init(application: Application) -> None:
     global _notified_admin
     # MongoDB ulanishini tekshirish
     try:
-        await db_client.admin.command('ping')
+        # server_info() MongoDB ulanishini to'liq tekshiradi (handshake ham)
+        await db_client.server_info()
         logger.info("MongoDB ulanishi muvaffaqiyatli!")
     except Exception as e:
-        logger.critical(f"MongoDB-ga ulanib bo'lmadi: {e}")
+        logger.critical(f"CRITICAL: MongoDB-ga ulanib bo'lmadi (Handshake failed?): {e}")
+        # Error tafsilotlarini adminlarga yuboramiz
+        for aid in ADMIN_IDS:
+            try:
+                await application.bot.send_message(
+                    chat_id=aid,
+                    text=f"❌ <b>DB Connection Error:</b>\n<code>{str(e)[:4000]}</code>\n\nIltimos, MongoDB Atlas Network Access (IP Whitelist) ni tekshiring!",
+                    parse_mode="HTML"
+                )
+            except: pass
         
     await load_data()
     if not _notified_admin:
