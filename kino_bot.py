@@ -10,7 +10,8 @@ from telegram.ext import (
 )
 from telegram import InlineQueryResultArticle, InputTextMessageContent
 
-import httpx
+import urllib.request
+import urllib.error
 import re
 
 _notified_admin = False
@@ -33,37 +34,43 @@ KV_URL = os.environ.get("KV_REST_API_URL")
 KV_TOKEN = os.environ.get("KV_REST_API_TOKEN")
 
 async def kv_get(key):
-    """Asinxron KV ma'lumot olish"""
+    """Vercel KV dan ma'lumot olish (urllib orqali)"""
     if not KV_URL or not KV_TOKEN:
         return None
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
+        loop = asyncio.get_event_loop()
+        def _get():
+            req = urllib.request.Request(
                 f"{KV_URL}/get/{key}",
-                headers={"Authorization": f"Bearer {KV_TOKEN}"},
-                timeout=10.0
+                headers={"Authorization": f"Bearer {KV_TOKEN}"}
             )
-            if response.status_code == 200:
-                res_json = response.json()
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res_json = json.loads(resp.read().decode())
                 val = res_json.get("result")
                 return json.loads(val) if val else None
+        return await loop.run_in_executor(None, _get)
     except Exception as e:
         logger.error(f"KV Get xato: {e}")
     return None
 
 async def kv_set(key, value):
-    """Asinxron KV ma'lumot saqlash"""
+    """Vercel KV ga ma'lumot saqlash (urllib orqali)"""
     if not KV_URL or not KV_TOKEN:
         return
     try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
+        loop = asyncio.get_event_loop()
+        payload = json.dumps(value, ensure_ascii=False).encode('utf-8')
+        def _set():
+            req = urllib.request.Request(
                 f"{KV_URL}/set/{key}",
-                headers={"Authorization": f"Bearer {KV_TOKEN}"},
-                content=json.dumps(value, ensure_ascii=False).encode('utf-8'),
-                timeout=10.0
+                data=payload,
+                headers={"Authorization": f"Bearer {KV_TOKEN}", "Content-Type": "application/json"},
+                method="POST"
             )
+            with urllib.request.urlopen(req, timeout=10):
+                pass
             logger.info(f"KV Set muvaffaqiyatli: {key}")
+        await loop.run_in_executor(None, _set)
     except Exception as e:
         logger.error(f"KV Set xato: {e}")
 
