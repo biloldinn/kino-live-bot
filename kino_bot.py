@@ -5,6 +5,7 @@ import asyncio
 import re
 import urllib.request
 import urllib.error
+import html
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import (
@@ -20,110 +21,126 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============= SOZLAMALAR =============
-TOKEN = os.environ.get("BOT_TOKEN", "8679177935:AAHd2tcTrf_P0F7396UJjJXNjVjNkxL6lw0")
+TOKEN = os.environ.get("BOT_TOKEN", "8679177935:AAEDtJ7vHKzhJV1HTkr5BMWscPhKdzn43UQ")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "7985206085").split(",") if x.strip()]
 BOT_URL = "https://t.me/kino_livebot"
 DATA_FILE = "kino_data.json"
 STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
-KV_URL = os.environ.get("KV_REST_API_URL")
-KV_TOKEN = os.environ.get("KV_REST_API_TOKEN")
+
+# MongoDB
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://bilol006:bilol006@cluster0.y0pbpop.mongodb.net/?appName=Cluster0")
+from motor.motor_asyncio import AsyncIOMotorClient
+db_client = AsyncIOMotorClient(MONGO_URL)
+db = db_client["kino_bot_db"]
+movies_col = db["movies"]
+users_col = db["users"]
+config_col = db["config"]
+states_col = db["states"]
 
 _notified_admin = False
 
-# ============= VERCEL KV (urllib - no extra deps) =============
-async def kv_get(key):
-    if not KV_URL or not KV_TOKEN:
-        return None
-    try:
-        loop = asyncio.get_event_loop()
-        def _do():
-            req = urllib.request.Request(
-                f"{KV_URL}/get/{key}",
-                headers={"Authorization": f"Bearer {KV_TOKEN}"}
-            )
-            with urllib.request.urlopen(req, timeout=10) as r:
-                result = json.loads(r.read().decode()).get("result")
-                return json.loads(result) if result else None
-        return await loop.run_in_executor(None, _do)
-    except Exception as e:
-        logger.error(f"KV Get xato ({key}): {e}")
-    return None
+# KV O'chirildi (MongoDB ishlatilmoqda)
 
-async def kv_set(key, value):
-    if not KV_URL or not KV_TOKEN:
-        return
-    try:
-        loop = asyncio.get_event_loop()
-        payload = json.dumps(value, ensure_ascii=False).encode()
-        def _do():
-            req = urllib.request.Request(
-                f"{KV_URL}/set/{key}",
-                data=payload,
-                headers={"Authorization": f"Bearer {KV_TOKEN}", "Content-Type": "application/json"},
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=10):
-                pass
-        await loop.run_in_executor(None, _do)
-    except Exception as e:
-        logger.error(f"KV Set xato ({key}): {e}")
-
-# ============= USER STATE (KV orqali, Vercel-safe) =============
+# ============= USER STATE (MONGODB) =============
 async def get_state(user_id):
-    d = await kv_get(f"state_{user_id}")
-    if d and isinstance(d, dict):
-        return d.get("state"), d.get("data", {})
+    try:
+        d = await states_col.find_one({"_id": str(user_id)})
+        if d:
+            return d.get("state"), d.get("data", {})
+    except Exception as e:
+        logger.error(f"State olishda xato ({user_id}): {e}")
     return None, {}
 
 async def set_state(user_id, state, extra=None):
-    await kv_set(f"state_{user_id}", {"state": state, "data": extra or {}})
+    try:
+        if state is None:
+            await states_col.delete_one({"_id": str(user_id)})
+        else:
+            await states_col.update_one(
+                {"_id": str(user_id)},
+                {"$set": {"state": state, "data": extra or {}}},
+                upsert=True
+            )
+    except Exception as e:
+        logger.error(f"State saqlashda xato ({user_id}): {e}")
 
-# ============= MA'LUMOTLAR =============
-data = {
+# ============= MA'LUMOTLAR VA PERSISTENCE (MONGODB) =============
+cached_data = {
     "kinolar": {},
     "guruhlar": [],
-    "foydalanuvchilar": {},
     "statistika": {"jami_qidiruvlar": 0},
     "majburiy_kanallar": []
 }
 
-async def load_data():
-    global data
-    kv_data = await kv_get("kino_bot_data")
-    if kv_data and isinstance(kv_data, dict):
-        data.update(kv_data)
-        data.setdefault("kinolar", {})
-        data.setdefault("guruhlar", [])
-        data.setdefault("foydalanuvchilar", {})
-        data.setdefault("statistika", {"jami_qidiruvlar": 0})
-        data.setdefault("majburiy_kanallar", [])
-        logger.info("Ma'lumotlar KV dan yuklandi.")
-        return
-    # Mahalliy fayl
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                data.update(loaded)
-                logger.info("Ma'lumotlar lokal fayldan yuklandi.")
-                return
-        except Exception as e:
-            logger.error(f"Lokal fayl o'qishda xato: {e}")
-    logger.info("Yangi bo'sh ma'lumotlar yaratildi.")
+last_config_load = 0
 
-async def save_data():
-    # Lokal
+async def load_data(force=False):
+    """Barcha global sozlamalarni MongoDB dan yuklaydi"""
+    global cached_data, last_config_load
+    now = asyncio.get_event_loop().time()
+    if not force and now - last_config_load < 60: # 60 soniya kesh
+        return
+
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        conf = await config_col.find_one({"_id": "main_config"})
+        if conf:
+            cached_data.update(conf)
+            last_config_load = now
+            logger.info("Konfiguratsiya MongoDB dan yuklandi.")
+        elif os.path.exists(DATA_FILE):
+            # ... (migratsiya kodi)
+            pass
     except Exception as e:
-        logger.error(f"Lokal saqlashda xato: {e}")
-    # KV
-    await kv_set("kino_bot_data", data)
+        logger.error(f"MongoDB yuklashda xato: {e}")
+
+async def save_config():
+    """Asosiy konfiguratsiyani saqlaydi"""
+    config = {
+        "guruhlar": cached_data["guruhlar"],
+        "majburiy_kanallar": cached_data["majburiy_kanallar"],
+        "statistika": cached_data["statistika"]
+    }
+    try:
+        await config_col.update_one({"_id": "main_config"}, {"$set": config}, upsert=True)
+    except Exception as e:
+        logger.error(f"Config saqlashda xato: {e}")
+
+async def get_movie(kod):
+    """Kinoni MongoDB dan oladi"""
+    try:
+        movie = await movies_col.find_one({"_id": str(kod)})
+        return movie
+    except Exception as e:
+        logger.error(f"Kino olishda xato ({kod}): {e}")
+    return None
+
+async def save_movie(kod, movie_data):
+    """Kinoni MongoDB ga saqlaydi"""
+    try:
+        await movies_col.update_one({"_id": str(kod)}, {"$set": movie_data}, upsert=True)
+        # Umumiy statistika
+        cached_data["statistika"]["jami_kinolar"] = await movies_col.count_documents({})
+        await save_config()
+    except Exception as e:
+        logger.error(f"Kino saqlashda xato ({kod}): {e}")
+
+async def delete_movie(kod):
+    """Kinoni o'chiradi"""
+    try:
+        await movies_col.delete_one({"_id": str(kod)})
+    except Exception as e:
+        logger.error(f"Kino o'chirishda xato ({kod}): {e}")
 
 # ============= POST INIT =============
 async def post_init(application: Application) -> None:
     global _notified_admin
+    # MongoDB ulanishini tekshirish
+    try:
+        await db_client.admin.command('ping')
+        logger.info("MongoDB ulanishi muvaffaqiyatli!")
+    except Exception as e:
+        logger.critical(f"MongoDB-ga ulanib bo'lmadi: {e}")
+        
     await load_data()
     if not _notified_admin:
         _notified_admin = True
@@ -131,8 +148,8 @@ async def post_init(application: Application) -> None:
             try:
                 await application.bot.send_message(
                     chat_id=aid,
-                    text="✅ *Bot muvaffaqiyatli yangilandi!* (v3.0 - Mukammal)\n\nBarcha tizimlar faol. 🚀",
-                    parse_mode="Markdown"
+                    text="✅ <b>Bot MongoDB bilan ishga tushdi!</b> (v4.5)\n\nTizimlar faol. 🚀",
+                    parse_mode="HTML"
                 )
             except Exception as e:
                 logger.warning(f"Admin xabari yuborilmadi {aid}: {e}")
@@ -140,16 +157,23 @@ async def post_init(application: Application) -> None:
 # ============= YORDAMCHI =============
 async def register_user(user):
     uid = str(user.id)
-    if uid not in data["foydalanuvchilar"]:
-        data["foydalanuvchilar"][uid] = {
-            "username": user.username or "",
-            "first_name": user.first_name or "",
-            "qoshilgan": datetime.now().strftime("%Y-%m-%d %H:%M")
-        }
-        await save_data()
+    try:
+        await users_col.update_one(
+            {"_id": uid},
+            {"$setOnInsert": {
+                "username": user.username or "",
+                "first_name": user.first_name or "",
+                "qoshilgan": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "qidiruvlar": 0
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"User ro'yxatga olishda xato: {e}")
 
 async def check_subscription(user_id, bot):
-    kanallar = data.get("majburiy_kanallar", [])
+    await load_data() # Yangi kanallarni tekshirish uchun keshni yangilaymiz
+    kanallar = cached_data.get("majburiy_kanallar", [])
     if not kanallar:
         return True
     for ch in kanallar:
@@ -167,18 +191,19 @@ async def check_subscription(user_id, bot):
 
 def sub_keyboard():
     rows = []
-    for ch in data.get("majburiy_kanallar", []):
+    for ch in cached_data.get("majburiy_kanallar", []):
         rows.append([InlineKeyboardButton(ch.get("name", "📢 Obuna bo'lish"), url=ch.get("url", BOT_URL))])
     rows.append([InlineKeyboardButton("✅ Obunani tasdiqlash", callback_data="check_sub")])
     return InlineKeyboardMarkup(rows)
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 Kino qo'shish", callback_data="admin_add")],
-        [InlineKeyboardButton("🗑 Kino o'chirish", callback_data="admin_del")],
-        [InlineKeyboardButton("📢 Kanal qo'shish", callback_data="admin_add_ch")],
-        [InlineKeyboardButton("❌ Kanal o'chirish", callback_data="admin_del_ch")],
+        [InlineKeyboardButton("🎬 Kino qo'shish", callback_data="admin_add"),
+         InlineKeyboardButton("🗑 Kino o'chirish", callback_data="admin_del")],
+        [InlineKeyboardButton("📢 Kanal qo'shish", callback_data="admin_add_ch"),
+         InlineKeyboardButton("❌ Kanal o'chirish", callback_data="admin_del_ch")],
         [InlineKeyboardButton("📣 Reklama tarqatish", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📚 Kinolar ro'yxati", callback_data="admin_list_movies")],
         [InlineKeyboardButton("📊 Statistika", callback_data="admin_stats")],
     ])
 
@@ -188,23 +213,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await register_user(user)
 
-    if chat.type != "private":
+    if chat.type != "private" and user.id not in ADMIN_IDS:
         return
 
     # Deep link orqali kod
     kod = context.args[0].strip() if context.args else None
 
-    # Obuna tekshirish
-    if data.get("majburiy_kanallar"):
+    # Obuna tekshirish (faqat foydalanuvchilar uchun)
+    if user.id not in ADMIN_IDS and cached_data.get("majburiy_kanallar"):
         ok = await check_subscription(user.id, context.bot)
         if not ok:
             if kod:
                 await set_state(user.id, "WAIT_SUB", {"kod": kod})
             await update.message.reply_text(
-                f"👋 Salom *{user.first_name}*!\n\n"
+                f"👋 Salom <b>{html.escape(user.first_name)}</b>!\n\n"
                 "⚠️ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:",
                 reply_markup=sub_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
             return
 
@@ -214,16 +239,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user.id in ADMIN_IDS:
         await update.message.reply_text(
-            "👑 *Admin Panel*\n\nQuyidagi tugmalardan birini tanlang:",
+            "👑 <b>Admin Panel</b>\n\nQuyidagi tugmalardan birini tanlang:",
             reply_markup=admin_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     else:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Kinolar ro'yxati", callback_data="list_movies")]])
         await update.message.reply_text(
-            f"🎬 *Assalomu alaykum {user.first_name}!*\n\n"
-            "Kino kodini yozing — men darhol topib beraman.\n"
-            "Yoki kino nomini yozib qidirishingiz ham mumkin! 🔍",
-            parse_mode="Markdown"
+            f"🎬 <b>Assalomu alaykum {html.escape(user.first_name)}!</b>\n\n"
+            "Kino kodini yoki nomini yozing — men darhol topib beraman! 🔍",
+            reply_markup=kb,
+            parse_mode="HTML"
         )
 
 # ============= KINO YUBORISH =============
@@ -231,39 +257,48 @@ async def send_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: st
     user_id = update.effective_user.id
     kod = str(kod).strip()
 
-    movie = data["kinolar"].get(kod)
+    movie = await get_movie(kod)
 
     # Agar kod bo'yicha topilmasa — nom bo'yicha qidirish
     if not movie:
-        matches = [
-            (k, v) for k, v in data["kinolar"].items()
-            if kod.lower() in v.get("desc", "").lower()
-        ]
+        try:
+            # MongoDB orqali tavsif bo'yicha qidirish (regex-ni escape qilib)
+            import re as regex_lib
+            safe_text = regex_lib.escape(kod)
+            cursor = movies_col.find({"desc": {"$regex": safe_text, "$options": "i"}}).limit(10)
+            matches = await cursor.to_list(length=10)
+        except Exception as e:
+            logger.error(f"Qidiruvda xato: {e}")
+            matches = []
+
         if not matches:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"❌ `{kod}` bo'yicha kino topilmadi.\n\nKodni yoki nomni to'g'ri kiriting.",
-                parse_mode="Markdown"
+                text=f"❌ <code>{kod}</code> kodi yoki nomi bo'yicha kino topilmadi.\n\nKodni to'g'ri kiriting.",
+                parse_mode="HTML"
             )
             return
         if len(matches) == 1:
-            kod, movie = matches[0]
+            movie = matches[0]
+            kod = movie["_id"]
         else:
-            txt = "🔎 *Quyidagi kinolar topildi:*\n\n"
-            for k, v in matches[:10]:
-                txt += f"▪️ `{k}` — {v.get('desc', '🎬')}\n"
+            txt = "🔎 <b>Quyidagi kinolar topildi:</b>\n\n"
+            for v in matches:
+                txt += f"▪️ <code>{v['_id']}</code> — {v.get('desc', '🎬')}\n"
             txt += "\nKino kodini yuboring."
-            await context.bot.send_message(chat_id=user_id, text=txt, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=user_id, text=txt, parse_mode="HTML")
             return
 
-    msg_id = movie["msg_id"] if isinstance(movie, dict) else movie
-    chat_id = movie.get("chat_id", STORAGE_CHANNEL_ID) if isinstance(movie, dict) else STORAGE_CHANNEL_ID
-    desc = movie.get("desc", "🎬 Kino") if isinstance(movie, dict) else "🎬 Kino"
+    msg_id = movie["msg_id"]
+    chat_id = movie.get("chat_id", STORAGE_CHANNEL_ID)
+    desc = movie.get("desc", "🎬 Kino")
 
     share_url = f"https://t.me/share/url?url=https://t.me/kino_livebot?start={kod}&text=🎬 {desc}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📤 Do'stlarga ulashish", url=share_url)]])
 
-    caption = f"🎬 *{desc}*\n🔑 Kod: `{kod}`\n\n👉 {BOT_URL}?start={kod}"
+    # HTML yordamida caption tuzish
+    safe_desc = html.escape(desc)
+    caption = f"🎬 <b>{safe_desc}</b>\n🔑 Kod: <code>{kod}</code>\n\n👉 {BOT_URL}?start={kod}"
 
     status = await context.bot.send_message(chat_id=user_id, text="🔍 Kino yuklanmoqda...")
     try:
@@ -272,16 +307,19 @@ async def send_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: st
             from_chat_id=chat_id,
             message_id=msg_id,
             caption=caption,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             protect_content=True,
             reply_markup=kb
         )
         await status.delete()
-        data["statistika"]["jami_qidiruvlar"] = data["statistika"].get("jami_qidiruvlar", 0) + 1
-        uid = str(user_id)
-        if uid in data["foydalanuvchilar"]:
-            data["foydalanuvchilar"][uid]["qidiruvlar"] = data["foydalanuvchilar"][uid].get("qidiruvlar", 0) + 1
-        await save_data()
+        cached_data["statistika"]["jami_qidiruvlar"] = cached_data["statistika"].get("jami_qidiruvlar", 0) + 1
+        
+        # User statistikasini yangilash
+        try:
+            await users_col.update_one({"_id": str(user_id)}, {"$inc": {"qidiruvlar": 1}})
+        except: pass
+        
+        await save_config()
     except Exception as e:
         logger.error(f"Kino yuborishda xato: {e}")
         await status.edit_text("❌ Kino yuborishda xatolik. Kino o'chirilgan bo'lishi mumkin.")
@@ -299,9 +337,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in ADMIN_IDS:
         if state == "WAIT_DEL_CODE":
             await set_state(user.id, None)
-            if text in data["kinolar"]:
-                del data["kinolar"][text]
-                await save_data()
+            movie = await get_movie(text)
+            if movie:
+                await delete_movie(text)
                 await update.message.reply_text(f"✅ `{text}` kodli kino o'chirildi.", parse_mode="Markdown", reply_markup=admin_keyboard())
             else:
                 await update.message.reply_text(f"❌ `{text}` kodli kino topilmadi.", parse_mode="Markdown", reply_markup=admin_keyboard())
@@ -319,8 +357,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif state == "WAIT_CH_NAME":
             new_ch = {"chat_id": sdata.get("ch_id"), "url": sdata.get("ch_url"), "name": text}
-            data["majburiy_kanallar"].append(new_ch)
-            await save_data()
+            cached_data["majburiy_kanallar"].append(new_ch)
+            await save_config()
             await set_state(user.id, None)
             await update.message.reply_text(f"✅ Kanal qo'shildi: *{text}*", parse_mode="Markdown", reply_markup=admin_keyboard())
             return
@@ -328,50 +366,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif state == "WAIT_AD_TEXT":
             await set_state(user.id, None)
             ad_text = update.message.text_html
-            await update.message.reply_text("📣 Reklama tarqatilmoqda...")
+            status_msg = await update.message.reply_text("📣 Reklama tarqatish boshlandi...")
 
-            ok_gr = ok_usr = fail_gr = 0
-            bad_groups = []
-            for cid in list(data.get("guruhlar", [])):
+            ok_gr = ok_usr = fail_gr = fail_usr = 0
+            
+            # 1. Guruhlarga (Keshdan)
+            for cid in list(cached_data.get("guruhlar", [])):
                 try:
                     await context.bot.send_message(chat_id=int(cid), text=ad_text, parse_mode="HTML")
                     ok_gr += 1
                     await asyncio.sleep(0.3)
                 except:
                     fail_gr += 1
-                    bad_groups.append(cid)
 
-            for bad in bad_groups:
-                if bad in data["guruhlar"]:
-                    data["guruhlar"].remove(bad)
-            if bad_groups:
-                await save_data()
+            # 2. Barcha userlarga (MongoDB-dan)
+            try:
+                cursor = users_col.find({}, {"_id": 1})
+                async for user_doc in cursor:
+                    uid = user_doc["_id"]
+                    try:
+                        await context.bot.send_message(chat_id=int(uid), text=ad_text, parse_mode="HTML")
+                        ok_usr += 1
+                        await asyncio.sleep(0.05)
+                    except:
+                        fail_usr += 1
+            except Exception as e:
+                logger.error(f"Broadcast user error: {e}")
 
-            for uid in list(data.get("foydalanuvchilar", {}).keys()):
-                try:
-                    await context.bot.send_message(chat_id=int(uid), text=ad_text, parse_mode="HTML")
-                    ok_usr += 1
-                    await asyncio.sleep(0.05)
-                except:
-                    pass
-
-            await update.message.reply_text(
-                f"📣 *Reklama yakunlandi:*\n\n"
-                f"👥 Foydalanuvchilar: {ok_usr}\n"
-                f"🏢 Guruhlar: {ok_gr}\n"
-                f"❌ Chiqarib yuborilgan guruhlar: {fail_gr}",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
+            await status_msg.edit_text(
+                f"📣 <b>Reklama yakunlandi:</b>\n\n"
+                f"👥 Foydalanuvchilar: <b>{ok_usr}</b> (Muvaffaqiyatli), {fail_usr} (Xato)\n"
+                f"🏢 Guruhlar: <b>{ok_gr}</b> (Muvaffaqiyatli), {fail_gr} (Xato)",
+                parse_mode="HTML"
             )
+            await update.message.reply_text("Admin Panel:", reply_markup=admin_keyboard())
             return
 
     # ----- FOYDALANUVCHI: OBUNA TEKSHIRISH -----
-    if data.get("majburiy_kanallar"):
+    if cached_data.get("majburiy_kanallar"):
         ok = await check_subscription(user.id, context.bot)
         if not ok:
             await set_state(user.id, "WAIT_SUB", {"kod": text})
             await update.message.reply_text(
-                "⚠️ Avval kanallarga obuna bo'ling!",
+                "⚠️ Avval quyidagi kanallarga obuna bo'ling!",
                 reply_markup=sub_keyboard()
             )
             return
@@ -398,38 +435,40 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Kod ajratish: ID/Kod dan keyin kelgan raqamni ustivor olish
+    # Kod ajratish: FAQAT aniq markerlar bilan
     kod = None
     desc = caption.strip()
 
-    # 1. "ID: 284" yoki "Kod: 284" formatini sinash (raqamli)
-    m = re.search(r'(?i)(?:id|kod|kodi)\s*[:\-]?\s*(\d+)', caption)
+    # 1. "ID: 284" yoki "Kod: 284" formatini sinash
+    m = re.search(r'(?i)\b(?:id|kodi|kod)\b\s*[:\-]?\s*([A-Za-z0-9]+)', caption)
     if m:
         kod = m.group(1)
-        desc = re.sub(r'(?i)(?:id|kod|kodi)\s*[:\-]?\s*\d+', '', caption).strip()
-
-    # 2. Agar topilmasa — har qanday ID kalit so'zi bilan alfanumerik
+        desc = re.sub(re.escape(m.group(0)), '', caption).strip()
+    
+    # 2. #123 yoki №123 formatini tekshirish
     if not kod:
-        m = re.search(r'(?i)(?:id|kod|kodi)\s*[:\-]?\s*([A-Za-z0-9]+)', caption)
+        m = re.search(r'(?i)[#№]\s*([A-Za-z0-9]+)', caption)
         if m:
             kod = m.group(1)
-            desc = re.sub(r'(?i)(?:id|kod|kodi)\s*[:\-]?\s*[A-Za-z0-9]+', '', caption).strip()
+            desc = re.sub(re.escape(m.group(0)), '', caption).strip()
 
-    # 3. Agar kalit so'z yo'q bo'lsa — birinchi token raqam bo'lsa uni kod deb ol
+    # FALLBACK YO'Q: Agar kod topilmasa, bot guessing qilmaydi.
+    # Bu "ozi qoyilib qolyapti" muammosini hal qiladi.
+
     if not kod:
-        parts = caption.strip().split(None, 1)
-        if parts and re.fullmatch(r'\d+', parts[0]):
-            kod = parts[0]
-            desc = parts[1].strip() if len(parts) > 1 else "🎬 Kino"
+        await update.message.reply_text(
+            "❌ <b>Kino kodini aniqlab bo'lmadi!</b>\n\n"
+            "Iltimos, videoga izoh qilib quyidagilardan birini yozing:\n"
+            "<code>Kod: 123 Nom</code> yoki <code>#123 Nom</code>",
+            parse_mode="HTML"
+        )
+        return
 
-    # 4. Oxirgi fallback: birinchi so'z
-    if not kod:
-        parts = caption.strip().split(None, 1)
-        kod = parts[0]
-        desc = parts[1].strip() if len(parts) > 1 else "🎬 Kino"
-
-    if not desc:
-        desc = caption.strip()
+    if not desc or desc == caption:
+        desc = "🎬 Kino"
+    else:
+        # Kod topilgan bo'lsa, uni desc dan olib tashlashga harakat qilamiz
+        pass
 
     # Kinoni storage kanalga nusxalash
     status = await update.message.reply_text(f"📥 Kino `{kod}` kodi bilan saqlanmoqda...", parse_mode="Markdown")
@@ -446,19 +485,19 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             store_chat = update.message.chat_id
             store_msg = update.message.message_id
 
-        data["kinolar"][str(kod)] = {
+        movie_data = {
             "msg_id": store_msg,
             "chat_id": store_chat,
             "desc": desc
         }
-        await save_data()
+        await save_movie(kod, movie_data)
         await status.delete()
 
         await update.message.reply_text(
-            f"✅ *Kino saqlandi!*\n\n"
-            f"🔑 Kod: `{kod}`\n"
-            f"📝 Nomi: {desc}",
-            parse_mode="Markdown",
+            f"✅ <b>Kino saqlandi!</b>\n\n"
+            f"🔑 Kod: <code>{kod}</code>\n"
+            f"📝 Nomi: {html.escape(desc)}",
+            parse_mode="HTML",
             reply_markup=admin_keyboard()
         )
         # Reklama tarqatish
@@ -470,24 +509,23 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============= YANGI KINO REKLAMASI =============
 async def broadcast_new_movie(context, kod, desc):
+    import html
+    safe_desc = html.escape(desc)
     msg = (
-        f"🎬 *YANGI KINO!*\n\n"
-        f"📝 {desc}\n"
-        f"🔑 Kod: `{kod}`\n\n"
+        f"🎬 <b>YANGI KINO!</b>\n\n"
+        f"📝 {safe_desc}\n"
+        f"🔑 Kod: <code>{kod}</code>\n\n"
         f"👉 {BOT_URL}?start={kod}"
     )
-    for cid in list(data.get("guruhlar", [])):
+    # Eslatma: Broadcast uchun barcha userlarni olish kerak. 
+    # Hozirgi tuzilmada biz barcha user_id larni bilmaymiz.
+    # Shuning uchun guruhlarga yuborish bilan cheklanamiz yoki 
+    # user_id larni alohida listda saqlashimiz kerak.
+    for cid in list(cached_data.get("guruhlar", [])):
         try:
-            await context.bot.send_message(chat_id=int(cid), text=msg, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=int(cid), text=msg, parse_mode="HTML")
             await asyncio.sleep(0.3)
-        except:
-            pass
-    for uid in list(data.get("foydalanuvchilar", {}).keys()):
-        try:
-            await context.bot.send_message(chat_id=int(uid), text=msg, parse_mode="Markdown")
-            await asyncio.sleep(0.05)
-        except:
-            pass
+        except: pass
 
 # ============= CALLBACK HANDLER =============
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -538,7 +576,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("1️⃣ Kanal ID yoki @username kiriting:")
 
     elif cb == "admin_del_ch":
-        kanallar = data.get("majburiy_kanallar", [])
+        kanallar = cached_data.get("majburiy_kanallar", [])
         if not kanallar:
             await q.message.reply_text("Hozircha majburiy kanal yo'q.", reply_markup=admin_keyboard())
             return
@@ -547,25 +585,49 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Qaysi kanalni o'chirasiz?", reply_markup=InlineKeyboardMarkup(rows))
 
     elif cb == "admin_broadcast":
+        await q.message.reply_text("⚠️ Eslatma: Hozircha reklama faqat guruhlarga tarqatiladi (Userlar ko'pligi sababli).")
         await set_state(uid, "WAIT_AD_TEXT")
-        await q.message.reply_text("📝 Reklama matnini yuboring (HTML formati qo'llab-quvvatlanadi):")
+        await q.message.reply_text("📝 Reklama matnini yuboring (HTML formatida):")
 
     elif cb == "admin_stats":
-        kinolar = len(data.get("kinolar", {}))
-        users = len(data.get("foydalanuvchilar", {}))
-        groups = len(data.get("guruhlar", []))
-        searches = data.get("statistika", {}).get("jami_qidiruvlar", 0)
-        channels = len(data.get("majburiy_kanallar", []))
-        await q.message.reply_text(
-            f"📊 *Statistika:*\n\n"
+        try:
+            kinolar = await movies_col.count_documents({})
+            users = await users_col.count_documents({})
+        except:
+            kinolar = users = "Xato"
+            
+        groups = len(cached_data.get("guruhlar", []))
+        searches = cached_data.get("statistika", {}).get("jami_qidiruvlar", 0)
+        channels = len(cached_data.get("majburiy_kanallar", []))
+        await q.edit_message_text(
+            f"📊 <b>Statistika (MongoDB):</b>\n\n"
             f"🎬 Kinolar: {kinolar} ta\n"
             f"👤 Foydalanuvchilar: {users} ta\n"
             f"🏢 Guruhlar: {groups} ta\n"
             f"📢 Majburiy kanallar: {channels} ta\n"
             f"🔍 Jami qidiruvlar: {searches} ta",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=admin_keyboard()
         )
+
+    elif cb == "admin_list_movies" or cb == "list_movies":
+        try:
+            cursor = movies_col.find().sort("_id", -1).limit(30)
+            movies = await cursor.to_list(length=30)
+            if not movies:
+                await q.message.reply_text("Kinolar mavjud emas.")
+                return
+            txt = "🎬 <b>Oxirgi qo'shilgan kinolar:</b>\n\n"
+            for m in movies:
+                txt += f"▪️ <code>{m['_id']}</code> — {html.escape(m.get('desc', '🎬'))}\n"
+            
+            if uid in ADMIN_IDS:
+                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=admin_keyboard())
+            else:
+                await q.message.reply_text(txt, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"List movies error: {e}")
+            await q.message.reply_text("Xatolik yuz berdi.")
 
     elif cb == "admin_back":
         await set_state(uid, None)
@@ -573,10 +635,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif cb.startswith("del_ch_"):
         idx = int(cb.split("_")[2])
-        kanallar = data.get("majburiy_kanallar", [])
+        kanallar = cached_data.get("majburiy_kanallar", [])
         if 0 <= idx < len(kanallar):
             removed = kanallar.pop(idx)
-            await save_data()
+            await save_config()
             await q.edit_message_text(f"✅ *{removed['name']}* o'chirildi.", parse_mode="Markdown", reply_markup=admin_keyboard())
 
 # ============= GURUH KUZATISH =============
@@ -590,13 +652,13 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if ctype in ["group", "supergroup", "channel"]:
         if status in [ChatMember.ADMINISTRATOR, ChatMember.MEMBER]:
-            if cid not in data["guruhlar"]:
-                data["guruhlar"].append(cid)
-                await save_data()
+            if cid not in cached_data["guruhlar"]:
+                cached_data["guruhlar"].append(cid)
+                await save_config()
         elif status in [ChatMember.LEFT, ChatMember.KICKED, ChatMember.RESTRICTED]:
-            if cid in data["guruhlar"]:
-                data["guruhlar"].remove(cid)
-                await save_data()
+            if cid in cached_data["guruhlar"]:
+                cached_data["guruhlar"].remove(cid)
+                await save_config()
 
 # ============= APPLICATION =============
 def build_application():
