@@ -12,6 +12,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ChatMemberHandler
 )
+import aiohttp
 
 # ============= LOGGING =============
 logging.basicConfig(
@@ -155,6 +156,20 @@ async def post_init(application: Application) -> None:
                 logger.warning(f"Admin xabari yuborilmadi {aid}: {e}")
 
 # ============= YORDAMCHI =============
+async def fetch_movie_details(title):
+    """Kino haqida qisqacha ma'lumot qidiradi (Yil va Reyting)"""
+    try:
+        # OMDb API (Free tier uchun apikey kerak, lekin asosan placeholder sifatida qoldiramiz)
+        # Yoki oddiyroq search-dan foydalanish mumkin.
+        # Bu yerda biz Title-dan yilni ajratib olishga harakat qilamiz
+        year_match = re.search(r'\((\d{4})\)', title)
+        year = year_match.group(1) if year_match else "Noma'lum"
+        
+        # Kelajakda bu yerda API chaqiruvini amalga oshirish mumkin
+        return {"year": year, "rating": "IMDb: --"}
+    except:
+        return None
+
 async def register_user(user):
     uid = str(user.id)
     try:
@@ -293,12 +308,18 @@ async def send_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: st
     chat_id = movie.get("chat_id", STORAGE_CHANNEL_ID)
     desc = movie.get("desc", "🎬 Kino")
 
+    # Kino ma'lumotlarini qidirish
+    details = await fetch_movie_details(desc)
+    extra_info = ""
+    if details:
+        extra_info = f"\n📅 Yil: {details['year']} | ⭐ {details['rating']}"
+
     share_url = f"https://t.me/share/url?url=https://t.me/kino_livebot?start={kod}&text=🎬 {desc}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📤 Do'stlarga ulashish", url=share_url)]])
 
     # HTML yordamida caption tuzish
     safe_desc = html.escape(desc)
-    caption = f"🎬 <b>{safe_desc}</b>\n🔑 Kod: <code>{kod}</code>\n\n👉 {BOT_URL}?start={kod}"
+    caption = f"🎬 <b>{safe_desc}</b>{extra_info}\n🔑 Kod: <code>{kod}</code>\n\n👉 {BOT_URL}?start={kod}"
 
     status = await context.bot.send_message(chat_id=user_id, text="🔍 Kino yuklanmoqda...")
     try:
