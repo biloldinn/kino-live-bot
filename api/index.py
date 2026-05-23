@@ -6,22 +6,18 @@ from telegram import Update
 from kino_bot import build_application
 
 app = FastAPI()
-
-# Botni bitta marta yaratib olamiz
 ptb_app = build_application()
 
 @app.get("/")
 async def root():
-    return {"status": "Bot is running on Vercel"}
+    return {"status": "ok", "message": "Kino Bot is live on Vercel!"}
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    """Telegramdan kelayotgan webhooklarni qabul qiladi"""
     try:
         data = await request.json()
         update = Update.de_json(data, ptb_app.bot)
         
-        # Application context orqali update-ni qayta ishlaymiz
         async with ptb_app:
             await ptb_app.process_update(update)
             
@@ -30,10 +26,20 @@ async def webhook_handler(request: Request):
         print(f"Webhook error: {e}")
         return {"status": "error", "message": str(e)}
 
-# Vercel uchun qo'shimcha so'rov: Webhookni sozlash
-@app.get("/set_webhook")
-async def set_webhook():
-    """Botga webhook URL-ni avtomatik kiritish"""
-    # Eslatma: Buni manually ham qilish mumkin: 
-    # https://api.telegram.org/bot<TOKEN>/setWebhook?url=<URL>/webhook
-    return {"message": "Please set webhook manually using the URL provided in instructions."}
+@app.get("/setup")
+async def setup_webhook(request: Request):
+    """Webhookni avtomatik sozlaydi"""
+    # Vercel URL ni aniqlash
+    host = request.headers.get("host")
+    if not host:
+        return {"error": "Host not found"}
+    
+    url = f"https://{host}/webhook"
+    
+    async with ptb_app:
+        success = await ptb_app.bot.set_webhook(url=url)
+        
+    if success:
+        return {"status": "success", "url": url, "message": "Webhook muvaffaqiyatli o'rnatildi!"}
+    else:
+        return {"status": "failed", "message": "Webhookni o'rnatib bo'lmadi."}
