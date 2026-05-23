@@ -146,7 +146,7 @@ async def post_init(application: Application) -> None:
             try:
                 asyncio.create_task(application.bot.send_message(
                     chat_id=int(admin_id),
-                    text="✅ **Loyiha muvaffaqiyatli yangilandi!**\n\nBarcha yangi funksiyalar (Asinxron KV, Regex, Sharing) faol. 🚀",
+                    text="✅ **Loyiha yangilandi! (Versiya: 2.1 - Asinxron + Deep Regex)**\n\nBarcha tizimlar barqaror. 🚀",
                     parse_mode="Markdown"
                 ))
             except: pass
@@ -487,19 +487,25 @@ async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         import re
-        # Har qanday formatdagi Kodi: 123 yoki ID: 123 ni ushlash (katta/kichik harflar va bo'shliqlar bilan)
-        match = re.search(r'(?i)(?:id|kod|kodi)\s*[:\-]*\s*([a-z0-9]+)', caption)
+        # 1. Eng aniq format: ID: 123 (Raqamli ID ustuvor)
+        match = re.search(r'(?i)(?:id|kod|kodi)\s*[:\-]*\s*(\d{2,10})', caption)
         
+        # 2. Agar raqamli ID topilmasa, Alfanumerik (masalan: KUZ12)
+        if not match:
+            match = re.search(r'(?i)(?:id|kod|kodi)\s*[:\-]*\s*([a-z0-9]+)', caption)
+            
         if match:
             kod = match.group(1).strip()
-            desc = caption.replace(match.group(0), "").strip() # Kod qismini olib tashlaymiz
+            # Desc ni olishda kodi bor qatorni butunlay olib tashlagan ma'qul
+            desc = caption.replace(match.group(0), "").strip()
         else:
-            # Agar "kod" yoki "id" kabi so'zlar bo'lmasa, yozuv ichidagi birinchi sonni kod sifatida olamiz
+            # 3. Agar kod kalit so'zi bo'lmasa, shunchaki 2-10 xonali sonni izlash
             num_match = re.search(r'\b(\d{2,10})\b', caption)
             if num_match:
                 kod = num_match.group(1).strip()
                 desc = caption.replace(kod, "", 1).strip()
             else:
+                # 4. Fallback: Birinchi so'z
                 parts = caption.split(None, 1)
                 kod = parts[0].strip()
                 desc = parts[1].strip() if len(parts) > 1 else "🎬 Ajoyib kino"
