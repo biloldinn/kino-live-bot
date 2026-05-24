@@ -253,7 +253,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Obuna tekshirish (faqat foydalanuvchilar uchun)
     if user.id not in ADMIN_IDS and cached_data.get("majburiy_kanallar"):
         ok = await check_subscription(user.id, context.bot)
-        if not ok:
+        if ok is not True:
             if kod:
                 await set_state(user.id, "WAIT_SUB", {"kod": kod})
             await update.message.reply_text(
@@ -396,6 +396,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_ch = {"chat_id": sdata.get("ch_id"), "url": sdata.get("ch_url"), "name": text}
             cached_data["majburiy_kanallar"].append(new_ch)
             await save_config()
+            global last_config_load
+            last_config_load = 0 # Keshni yangilashga majburlash
             await set_state(user.id, None)
             await update.message.reply_text(f"✅ Kanal qo'shildi: *{text}*", parse_mode="Markdown", reply_markup=admin_keyboard())
             return
@@ -442,7 +444,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ----- FOYDALANUVCHI: OBUNA TEKSHIRISH -----
     if cached_data.get("majburiy_kanallar"):
         ok = await check_subscription(user.id, context.bot)
-        if not ok:
+        if ok is not True:
             await set_state(user.id, "WAIT_SUB", {"kod": text})
             await update.message.reply_text(
                 "⚠️ Avval quyidagi kanallarga obuna bo'ling!",
@@ -676,6 +678,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 0 <= idx < len(kanallar):
             removed = kanallar.pop(idx)
             await save_config()
+            global last_config_load
+            last_config_load = 0
             await q.edit_message_text(f"✅ *{removed['name']}* o'chirildi.", parse_mode="Markdown", reply_markup=admin_keyboard())
 
 # ============= GURUH KUZATISH =============
