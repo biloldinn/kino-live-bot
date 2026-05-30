@@ -273,7 +273,8 @@ def sub_keyboard():
 def admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 Kino qo'shish", callback_data="admin_add"),
-         InlineKeyboardButton("🗑 Kino o'chirish", callback_data="admin_del")],
+         InlineKeyboardButton("🎞 Serial yuklash", callback_data="admin_add_serial")],
+        [InlineKeyboardButton("🗑 Kino o'chirish", callback_data="admin_del")],
         [InlineKeyboardButton("📢 Kanal qo'shish", callback_data="admin_add_ch"),
          InlineKeyboardButton("❌ Kanal o'chirish", callback_data="admin_del_ch")],
         [InlineKeyboardButton("📣 Reklama tarqatish", callback_data="admin_broadcast")],
@@ -320,7 +321,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Kinolar ro'yxati", callback_data="list_movies")]])
         await update.message.reply_text(
-            f"🎬 <b>Assalomu alaykum {html.escape(user.first_name)}! (v5.0)</b>\n\n"
+            f"🎬 <b>Assalomu alaykum {html.escape(user.first_name)}! (v5.1)</b>\n\n"
             "Kino kodini yoki nomini yozing — men darhol topib beraman! 🔍",
             reply_markup=kb,
             parse_mode="HTML"
@@ -730,7 +731,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(
             "🎬 *Kino qo'shish:*\n\n"
             "Videoni yuboring va podpisiga quyidagi formatda yozing:\n"
-            "`284 Anakonda (1997)` yoki `ID:284 Anakonda`",
+            "`Kod: 123 Nom` yoki `#123 Nom`",
+            parse_mode="Markdown"
+        )
+
+    elif cb == "admin_add_serial":
+        await q.message.reply_text(
+            "🎞 *Serial yuklash (Auto-Serial mode):*\n\n"
+            "1. Birinchi qismni odatdagidek yuboring: `#100 Serial Nom Qism: 1`.\n"
+            "2. Keyingi qismlarni (video) shunchaki **kod yozmasdan** yuboravering.\n"
+            "3. Bot ularni avtomatik ravishda `#100` kodiga 2, 3, 4-qismlar qilib qo'shadi.\n\n"
+            "💡 *Eslatma:* Har doim botning shaxsiyiga yuboring (guruhga emas).",
             parse_mode="Markdown"
         )
 
