@@ -122,9 +122,51 @@ async def get_movie(kod):
     return None
 
 async def save_movie(kod, movie_data):
-    """Kinoni MongoDB ga saqlaydi"""
+    """Kinoni MongoDB ga saqlaydi yoki mavjudiga qism qo'shadi"""
     try:
-        await movies_col.update_one({"_id": str(kod)}, {"$set": movie_data}, upsert=True)
+        # Avval mavjudini tekshiramiz
+        existing = await movies_col.find_one({"_id": str(kod)})
+        
+        part = movie_data.get("part", 1)
+        new_episode = {
+            "msg_id": movie_data["msg_id"],
+            "chat_id": movie_data["chat_id"],
+            "part": part
+        }
+
+        if existing:
+            # Agar mavjud bo'lsa, episodes ro'yxatiga qo'shamiz (yoki yangilaymiz)
+            episodes = existing.get("episodes", [])
+            # Eski formatdagilarni migration qilish (agar faqat bitta msg_id bo'lsa)
+            if not episodes and "msg_id" in existing:
+                episodes = [{"msg_id": existing["msg_id"], "chat_id": existing["chat_id"], "part": 1}]
+            
+            # Qism bormi tekshirish
+            updated = False
+            for i, ep in enumerate(episodes):
+                if ep.get("part") == part:
+                    episodes[i] = new_episode
+                    updated = True
+                    break
+            
+            if not updated:
+                episodes.append(new_episode)
+            
+            # Qismlar bo'yicha saralash
+            episodes.sort(key=lambda x: x.get("part", 1))
+            
+            await movies_col.update_one(
+                {"_id": str(kod)},
+                {"$set": {"episodes": episodes, "desc": movie_data.get("desc", existing.get("desc"))}}
+            )
+        else:
+            # Yangi kino
+            await movies_col.insert_one({
+                "_id": str(kod),
+                "desc": movie_data.get("desc", "🎬 Kino"),
+                "episodes": [new_episode]
+            })
+
         # Umumiy statistika
         cached_data["statistika"]["jami_kinolar"] = await movies_col.count_documents({})
         await save_config()
@@ -315,14 +357,51 @@ async def send_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: st
         else:
             txt = "🔎 <b>Quyidagi kinolar topildi:</b>\n\n"
             for v in matches:
-                txt += f"▪️ <code>{v['_id']}</code> — {v.get('desc', '🎬')}\n"
+                # Qism sonini ko'rsatish
+                eps = v.get("episodes", [])
+                ep_count = len(eps) if eps else 1
+                suffix = f" ({ep_count} qism)" if ep_count > 1 else ""
+                txt += f"▪️ <code>{v['_id']}</code> — {v.get('desc', '🎬')}{suffix}\n"
             txt += "\nKino kodini yuboring."
             await context.bot.send_message(chat_id=user_id, text=txt, parse_mode="HTML")
             return
 
-    msg_id = movie["msg_id"]
-    chat_id = movie.get("chat_id", STORAGE_CHANNEL_ID)
+    # Epizod tanlash yoki yuborish
+    episodes = movie.get("episodes", [])
+    # Migration: Agar episodes yo'q bo'lsa (eski format), yasab olamiz
+    if not episodes and "msg_id" in movie:
+        episodes = [{"msg_id": movie["msg_id"], "chat_id": movie.get("chat_id", STORAGE_CHANNEL_ID), "part": 1}]
+    
+    if not episodes:
+        await context.bot.send_message(chat_id=user_id, text="⚠️ Ushbu koda video topilmadi.")
+        return
+
+    # Agar bir nechta qism bo'lsa va user qismni tanlamagan bo'lsa
+    # (Misol uchun context.args da qism bormi ko'ramiz - kelajak uchun)
+    if len(episodes) > 1:
+        # Qismlar ro'yxatini chiqarish
+        txt = f"🎬 <b>{html.escape(movie.get('desc', 'Kino'))}</b>\n\nUshbu koda {len(episodes)} ta qism topildi. Qaysi qismni ko'rmoqchisiz?"
+        rows = []
+        temp_row = []
+        for ep in episodes:
+            p = ep.get("part", 1)
+            temp_row.append(InlineKeyboardButton(f"{p}-qism", callback_data=f"get_part_{kod}_{p}"))
+            if len(temp_row) == 3:
+                rows.append(temp_row)
+                temp_row = []
+        if temp_row: rows.append(temp_row)
+        
+        await context.bot.send_message(chat_id=user_id, text=txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    # Faqat bitta qism bo'lsa (yoki birinchisini yuborish)
+    await send_episode(update, context, movie, episodes[0])
+
+async def send_episode(update: Update, context: ContextTypes.DEFAULT_TYPE, movie, episode):
+    user_id = update.effective_user.id
+    kod = movie["_id"]
     desc = movie.get("desc", "🎬 Kino")
+    part = episode.get("part", 1)
 
     # Kino ma'lumotlarini qidirish
     details = await fetch_movie_details(desc)
@@ -330,19 +409,19 @@ async def send_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: st
     if details:
         extra_info = f"\n📅 Yil: {details['year']} | ⭐ {details['rating']}"
 
+    part_text = f" | {part}-qism" if part > 1 else ""
     share_url = f"https://t.me/share/url?url=https://t.me/kino_livebot?start={kod}&text=🎬 {desc}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📤 Do'stlarga ulashish", url=share_url)]])
 
-    # HTML yordamida caption tuzish
     safe_desc = html.escape(desc)
-    caption = f"🎬 <b>{safe_desc}</b>{extra_info}\n🔑 Kod: <code>{kod}</code>\n\n👉 {BOT_URL}?start={kod}"
+    caption = f"🎬 <b>{safe_desc}</b>{part_text}{extra_info}\n🔑 Kod: <code>{kod}</code>\n\n👉 {BOT_URL}?start={kod}"
 
-    status = await context.bot.send_message(chat_id=user_id, text="🔍 Kino yuklanmoqda...")
+    status = await context.bot.send_message(chat_id=user_id, text="🔍 Yuklanmoqda...")
     try:
         await context.bot.copy_message(
             chat_id=user_id,
-            from_chat_id=chat_id,
-            message_id=msg_id,
+            from_chat_id=episode["chat_id"],
+            message_id=episode["msg_id"],
             caption=caption,
             parse_mode="HTML",
             protect_content=True,
@@ -350,16 +429,13 @@ async def send_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, kod: st
         )
         await status.delete()
         cached_data["statistika"]["jami_qidiruvlar"] = cached_data["statistika"].get("jami_qidiruvlar", 0) + 1
-        
-        # User statistikasini yangilash
         try:
             await users_col.update_one({"_id": str(user_id)}, {"$inc": {"qidiruvlar": 1}})
         except: pass
-        
         await save_config()
     except Exception as e:
-        logger.error(f"Kino yuborishda xato: {e}")
-        await status.edit_text("❌ Kino yuborishda xatolik. Kino o'chirilgan bo'lishi mumkin.")
+        logger.error(f"Episode yuborishda xato: {e}")
+        await status.edit_text("❌ Xatolik yuz berdi. Video o'chirilgan bo'lishi mumkin.")
 
 # ============= MATN HANDLER =============
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -457,7 +533,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============= MEDIA HANDLER (ADMIN KINO YUKLASH) =============
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    chat = update.effective_chat
+    
     if user.id not in ADMIN_IDS:
+        return
+
+    # Guruhlarda auto-save ni o'chiramiz
+    if chat.type != "private":
         return
 
     caption = update.message.caption or ""
@@ -494,11 +576,18 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # FALLBACK YO'Q: Agar kod topilmasa, bot guessing qilmaydi.
     # Bu "ozi qoyilib qolyapti" muammosini hal qiladi.
 
+    # 3. Qism aniqlash
+    part = 1
+    p_match = re.search(r'(?i)\b(?:qism|part|ep|seriya)\b\s*[:\-]?\s*(\d+)', caption)
+    if p_match:
+        part = int(p_match.group(1))
+        # Caption dan "qism" qismini olib tashlash (ixtiyoriy)
+
     if not kod:
         await update.message.reply_text(
             "❌ <b>Kino kodini aniqlab bo'lmadi!</b>\n\n"
-            "Iltimos, videoga izoh qilib quyidagilardan birini yozing:\n"
-            "<code>Kod: 123 Nom</code> yoki <code>#123 Nom</code>",
+            "Videoga izoh qilib quyidagilardan birini yozing:\n"
+            "<code>Kod: 123 Nom</code> yoki <code>#123 Nom Qism: 2</code>",
             parse_mode="HTML"
         )
         return
@@ -527,14 +616,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         movie_data = {
             "msg_id": store_msg,
             "chat_id": store_chat,
-            "desc": desc
+            "desc": desc,
+            "part": part
         }
         await save_movie(kod, movie_data)
         await status.delete()
 
         await update.message.reply_text(
-            f"✅ <b>Kino saqlandi!</b>\n\n"
+            f"✅ <b>{('Serial' if part > 1 else 'Kino')} saqlandi!</b>\n\n"
             f"🔑 Kod: <code>{kod}</code>\n"
+            f"🔢 Qism: {part}\n"
             f"📝 Nomi: {html.escape(desc)}",
             parse_mode="HTML",
             reply_markup=admin_keyboard()
@@ -572,6 +663,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
     cb = q.data
+
+    if cb.startswith("get_part_"):
+        # get_part_KOD_PART
+        parts = cb.split("_")
+        kod = parts[2]
+        p_num = int(parts[3])
+        movie = await get_movie(kod)
+        if movie:
+            episodes = movie.get("episodes", [])
+            target = next((e for e in episodes if e.get("part") == p_num), None)
+            if target:
+                await send_episode(update, context, movie, target)
+            else:
+                await q.message.reply_text("❌ Ushbu qism topilmadi.")
+        return
 
     # Obuna tasdiqlash
     if cb == "check_sub":
