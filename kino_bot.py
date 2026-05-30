@@ -76,7 +76,8 @@ cached_data = {
     "kinolar": {},
     "guruhlar": [],
     "statistika": {"jami_qidiruvlar": 0},
-    "majburiy_kanallar": []
+    "majburiy_kanallar": [],
+    "admin_sessions": {} # Adminlar uchun oxirgi kodlar (session)
 }
 
 last_config_load = 0
@@ -564,33 +565,54 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = re.search(r'(?i)\b(?:id|kodi|kod)\b\s*[:\-]?\s*([A-Za-z0-9]+)', caption)
     if m:
         kod = m.group(1)
-        desc = re.sub(re.escape(m.group(0)), '', caption).strip()
+        # Kodni caption dan olib tashlash
+        desc = re.sub(re.escape(m.group(0)), '', caption, flags=re.IGNORECASE).strip()
     
     # 2. #123 yoki №123 formatini tekshirish
     if not kod:
         m = re.search(r'(?i)[#№]\s*([A-Za-z0-9]+)', caption)
         if m:
             kod = m.group(1)
-            desc = re.sub(re.escape(m.group(0)), '', caption).strip()
+            desc = re.sub(re.escape(m.group(0)), '', caption, flags=re.IGNORECASE).strip()
 
-    # FALLBACK YO'Q: Agar kod topilmasa, bot guessing qilmaydi.
-    # Bu "ozi qoyilib qolyapti" muammosini hal qiladi.
-
-    # 3. Qism aniqlash
-    part = 1
-    p_match = re.search(r'(?i)\b(?:qism|part|ep|seriya)\b\s*[:\-]?\s*(\d+)', caption)
+    # 3. Qism aniqlash (Matndan qidirish: "12-qism", "Part 5" va h.k.)
+    part = None
+    p_match = re.search(r'(\d+)\s*(?:-?\s*qism|seriya|qisimi|part|ep|episode)', caption, re.IGNORECASE)
     if p_match:
         part = int(p_match.group(1))
-        # Caption dan "qism" qismini olib tashlash (ixtiyoriy)
+
+    # 4. Auto-Serial Session (Agar kod yo'q bo'lsa, oxirgi ishlatilgan kodni olamiz)
+    if not kod:
+        session = cached_data.get("admin_sessions", {}).get(str(user.id))
+        if session:
+            # Agar session 1 soatdan eski bo'lmasa (ixtiyoriy, hozircha doimiy)
+            kod = session.get("kod")
+            desc = session.get("desc", "🎬 Serial")
+            if part is None:
+                part = session.get("last_part", 1) + 1
+            logger.info(f"Auto-Serial sessiya ishlatildi: {kod}, Part: {part}")
 
     if not kod:
         await update.message.reply_text(
             "❌ <b>Kino kodini aniqlab bo'lmadi!</b>\n\n"
             "Videoga izoh qilib quyidagilardan birini yozing:\n"
-            "<code>Kod: 123 Nom</code> yoki <code>#123 Nom Qism: 2</code>",
+            "<code>Kod: 123 Nom</code> yoki <code>#123 Nom</code>\n\n"
+            "Serial qo'shayotgan bo'lsangiz, birinchi qismiga kod yozing, qolganlariga shunchaki video yuborsangiz ham bo'ladi.",
             parse_mode="HTML"
         )
         return
+
+    if part is None:
+        part = 1
+
+    # Sessiyani yangilash
+    if "admin_sessions" not in cached_data: cached_data["admin_sessions"] = {}
+    cached_data["admin_sessions"][str(user.id)] = {
+        "kod": kod,
+        "desc": desc,
+        "last_part": part,
+        "time": datetime.now()
+    }
 
     if not desc or desc == caption:
         desc = "🎬 Kino"
