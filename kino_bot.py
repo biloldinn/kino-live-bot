@@ -319,7 +319,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Kinolar ro'yxati", callback_data="list_movies")]])
         await update.message.reply_text(
-            f"🎬 <b>Assalomu alaykum {html.escape(user.first_name)}!</b>\n\n"
+            f"🎬 <b>Assalomu alaykum {html.escape(user.first_name)}! (v5.0)</b>\n\n"
             "Kino kodini yoki nomini yozing — men darhol topib beraman! 🔍",
             reply_markup=kb,
             parse_mode="HTML"
