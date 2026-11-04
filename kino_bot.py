@@ -22,9 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============= SOZLAMALAR =============
-TOKEN = os.environ.get("BOT_TOKEN", "8679177935:AAEDtJ7vHKzhJV1HTkr5BMWscPhKdzn43UQ")
+TOKEN = os.environ.get("BOT_TOKEN", "9251899633:AAEIhZLLqh3_1TztkI8Rid36yX3YHok_6Vo")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "7985206085").split(",") if x.strip()]
-BOT_URL = "https://t.me/kino_livebot"
+BOT_URL = "https://t.me/kino_liive_bot"
 DATA_FILE = "kino_data.json"
 STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
 
