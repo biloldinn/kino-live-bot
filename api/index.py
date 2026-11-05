@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from telegram import Update
 from kino_bot import build_application
@@ -13,26 +13,27 @@ app = FastAPI()
 ptb_app = build_application()
 
 
-@app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
-async def handle_get(request: Request, full_path: str):
-    """GET — har qanday yo'l uchun status qaytaradi"""
+@app.get("/")
+@app.head("/")
+async def root():
     return JSONResponse({"status": "Bot is running on Vercel", "bot": "@kino_liive_bot"})
 
 
-@app.api_route("/{full_path:path}", methods=["POST"])
-async def handle_post(request: Request, full_path: str):
-    """POST — Telegram webhookini qayta ishlaydi"""
+@app.post("/")
+@app.post("/webhook")
+async def webhook(request: Request):
     try:
         data = await request.json()
-        
-        # Faqat Telegram update bo'lsa process qilish
         if "update_id" in data:
             update = Update.de_json(data, ptb_app.bot)
             async with ptb_app:
                 await ptb_app.process_update(update)
-            return JSONResponse({"status": "ok"})
-        
-        return JSONResponse({"status": "ok", "note": "not a telegram update"})
+        return JSONResponse({"status": "ok"})
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/webhook")
+async def webhook_get():
+    return JSONResponse({"status": "webhook ready"})

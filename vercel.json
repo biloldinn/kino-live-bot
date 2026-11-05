@@ -1,13 +1,7 @@
 {
     "rewrites": [
-        {
-            "source": "/(.*)",
-            "destination": "/api/index.py"
-        }
-    ],
-    "functions": {
-        "api/index.py": {
-            "maxDuration": 30
-        }
-    }
+        { "source": "/webhook", "destination": "/api/index.py" },
+        { "source": "/", "destination": "/api/index.py" },
+        { "source": "/(.*)", "destination": "/api/index.py" }
+    ]
 }
