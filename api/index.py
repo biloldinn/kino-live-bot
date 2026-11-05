@@ -13,37 +13,26 @@ app = FastAPI()
 ptb_app = build_application()
 
 
-@app.api_route("/{full_path:path}", methods=["GET", "HEAD", "POST"])
-async def catch_all(request: Request, full_path: str):
-    path = request.url.path.rstrip("/")
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
+async def handle_get(request: Request, full_path: str):
+    """GET — har qanday yo'l uchun status qaytaradi"""
+    return JSONResponse({"status": "Bot is running on Vercel", "bot": "@kino_liive_bot"})
 
-    # ROOT
-    if path == "" or path == "/":
-        return JSONResponse({"status": "Bot is running on Vercel", "bot": "@kino_liive_bot"})
 
-    # WEBHOOK
-    if path == "/webhook":
-        if request.method == "POST":
-            try:
-                data = await request.json()
-                update = Update.de_json(data, ptb_app.bot)
-                async with ptb_app:
-                    await ptb_app.process_update(update)
-                return JSONResponse({"status": "ok"})
-            except Exception as e:
-                logger.error(f"Webhook error: {e}")
-                return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-        return JSONResponse({"status": "webhook endpoint ready"})
-
-    # SETUP
-    if path == "/setup":
-        host = request.headers.get("host", "")
-        url = f"https://{host}/webhook"
-        try:
+@app.api_route("/{full_path:path}", methods=["POST"])
+async def handle_post(request: Request, full_path: str):
+    """POST — Telegram webhookini qayta ishlaydi"""
+    try:
+        data = await request.json()
+        
+        # Faqat Telegram update bo'lsa process qilish
+        if "update_id" in data:
+            update = Update.de_json(data, ptb_app.bot)
             async with ptb_app:
-                success = await ptb_app.bot.set_webhook(url=url)
-            return JSONResponse({"status": "success" if success else "failed", "webhook_url": url})
-        except Exception as e:
-            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-    return JSONResponse({"status": "ok", "path": path})
+                await ptb_app.process_update(update)
+            return JSONResponse({"status": "ok"})
+        
+        return JSONResponse({"status": "ok", "note": "not a telegram update"})
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
