@@ -29,7 +29,7 @@ DATA_FILE = "kino_data.json"
 STORAGE_CHANNEL_ID = os.environ.get("STORAGE_CHANNEL_ID", "-1003855167117")
 
 # MongoDB
-MONGO_URL = os.environ.get("MONGO_URL")
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://bilol006:bilol006@cluster0.43suzwf.mongodb.net/?retryWrites=true&w=majority")
 
 db_client = None
 db = None
@@ -40,9 +40,19 @@ states_col = None
 
 if MONGO_URL:
     try:
-        if "tls=" not in MONGO_URL.lower():
+        url_lower = MONGO_URL.lower()
+        params = []
+        if "tls=" not in url_lower:
+            params.append("tls=true")
+        if "tlsallowinvalidcertificates=" not in url_lower:
+            params.append("tlsAllowInvalidCertificates=true")
+        if "retrywrites=" not in url_lower:
+            params.append("retryWrites=true")
+        if "w=" not in url_lower:
+            params.append("w=majority")
+        if params:
             separator = "&" if "?" in MONGO_URL else "?"
-            MONGO_URL += f"{separator}tls=true&tlsAllowInvalidCertificates=true&retryWrites=true&w=majority"
+            MONGO_URL += separator + "&".join(params)
         from motor.motor_asyncio import AsyncIOMotorClient
         db_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
         db = db_client["kino_bot_db"]
@@ -1192,7 +1202,28 @@ async def main():
     logger.info("Bot polling boshlanmoqda...")
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(drop_pending_updates=True)
+
+    # Railway / Hosting PORT tekshiruvi (Health-check)
+    port_str = os.environ.get("PORT")
+    if port_str:
+        try:
+            port = int(port_str)
+            from aiohttp import web
+            async def handle_ping(request):
+                return web.Response(text="Bot is running! @kino_liive_bot")
+            server = web.Application()
+            server.router.add_get("/", handle_ping)
+            server.router.add_get("/health", handle_ping)
+            runner = web.AppRunner(server)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", port)
+            await site.start()
+            logger.info(f"Health-check web server {port}-portda ishga tushdi.")
+        except Exception as e:
+            logger.warning(f"Health-check serverni yoqishda xatolik: {e}")
+
+    logger.info("Bot muvaffaqiyatli ishga tushdi va xabarlarni kutmoqda.")
     while True:
         await asyncio.sleep(3600)
 
