@@ -1,5 +1,4 @@
 import os
-import asyncio
 import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,14 +13,13 @@ ptb_app = build_application()
 
 
 @app.get("/")
-@app.head("/")
 async def root():
     return JSONResponse({"status": "Bot is running on Vercel", "bot": "@kino_liive_bot"})
 
 
 @app.post("/")
-@app.post("/webhook")
 async def webhook(request: Request):
+    """Telegram POST update-larini qabul qiladi"""
     try:
         data = await request.json()
         if "update_id" in data:
@@ -32,8 +30,3 @@ async def webhook(request: Request):
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.get("/webhook")
-async def webhook_get():
-    return JSONResponse({"status": "webhook ready"})
