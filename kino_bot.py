@@ -109,6 +109,7 @@ cached_data = {
     "guruhlar": [],
     "statistika": {"jami_qidiruvlar": 0},
     "majburiy_kanallar": [],
+    "kino_kanal": {}, # Shaxsiy / Rasmiy Kino Kanali
     "admin_sessions": {} # Adminlar uchun oxirgi kodlar (session)
 }
 
@@ -147,6 +148,7 @@ async def save_config():
     config = {
         "guruhlar": cached_data.get("guruhlar", []),
         "majburiy_kanallar": cached_data.get("majburiy_kanallar", []),
+        "kino_kanal": cached_data.get("kino_kanal", {}),
         "statistika": cached_data.get("statistika", {}),
         "kinolar": cached_data.get("kinolar", {}),
         "foydalanuvchilar": cached_data.get("foydalanuvchilar", {})
@@ -313,22 +315,66 @@ async def register_user(user):
             logger.error(f"User ro'yxatga olishda xato: {e}")
 
 async def check_subscription(user_id, bot):
-    await load_data() # Yangi kanallarni tekshirish uchun keshni yangilaymiz
+    await load_data()
     kanallar = cached_data.get("majburiy_kanallar", [])
     if not kanallar:
         return True
     for ch in kanallar:
+        cid = str(ch.get("chat_id", "")).strip()
+        if not cid:
+            continue
         try:
-            cid = str(ch.get("chat_id", "")).strip()
-            if not cid:
-                continue
-            member = await bot.get_chat_member(chat_id=cid, user_id=user_id)
+            target_cid = int(cid) if (cid.startswith("-100") or cid.isdigit() or (cid.startswith("-") and cid[1:].isdigit())) else cid
+            member = await bot.get_chat_member(chat_id=target_cid, user_id=user_id)
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            logger.error(f"Obuna tekshirishda xato ({cid}): {e}")
-            return "error"
+            logger.warning(f"Obuna tekshirishda xato ({cid}): {e}")
+            # Bot admin bo'lmagan yoki xato kanallar sababli foydalanuvchini bloklamaymiz
+            continue
     return True
+
+async def resolve_channel_info(context, message, raw_text=""):
+    """Kanalni forward, @username, link yoki ID orqali aniqlaydi va bot adminligini tekshiradi"""
+    chat_target = None
+    if message.forward_from_chat:
+        chat_target = message.forward_from_chat.id
+    else:
+        raw = raw_text.strip()
+        if "t.me/" in raw:
+            raw = raw.split("t.me/")[-1].replace("+", "").strip("/")
+            if not raw.startswith("@") and not raw.startswith("-100"):
+                raw = "@" + raw
+        elif not raw.startswith("@") and not raw.startswith("-100") and not raw.isdigit():
+            raw = "@" + raw
+        chat_target = int(raw) if (raw.startswith("-100") or (raw.startswith("-") and raw[1:].isdigit())) else raw
+
+    try:
+        chat = await context.bot.get_chat(chat_target)
+    except Exception as e:
+        return None, f"Kanal topilmadi: {e}"
+
+    try:
+        member = await context.bot.get_chat_member(chat_id=chat.id, user_id=context.bot.id)
+        if member.status not in ["administrator", "creator"]:
+            return None, f"Bot <b>{html.escape(chat.title)}</b> kanalida ADMIN emas! Iltimos, oldin botga administrator huquqini bering."
+    except Exception as e:
+        return None, f"Kanalda admin huquqini tekshirib bo'lmadi: {e}"
+
+    link = f"https://t.me/{chat.username}" if chat.username else ""
+    if not link:
+        try:
+            invite = await context.bot.create_chat_invite_link(chat.id)
+            link = invite.invite_link
+        except Exception:
+            link = BOT_URL
+
+    return {
+        "chat_id": str(chat.id),
+        "title": chat.title,
+        "username": chat.username or "",
+        "url": link
+    }, None
 
 def sub_keyboard():
     rows = []
@@ -341,10 +387,12 @@ def admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 Kino qo'shish", callback_data="admin_add"),
          InlineKeyboardButton("🎞 Serial yuklash", callback_data="admin_add_serial")],
+        [InlineKeyboardButton("📢 Kanalga post chiqarish", callback_data="admin_post_to_channel"),
+         InlineKeyboardButton("📢 Rasmiy Kino Kanal", callback_data="admin_kino_channel")],
         [InlineKeyboardButton("✏️ Kinoni tahrirlash", callback_data="admin_edit_movie"),
          InlineKeyboardButton("🗑 Kino o'chirish", callback_data="admin_del")],
-        [InlineKeyboardButton("📢 Kanal qo'shish", callback_data="admin_add_ch"),
-         InlineKeyboardButton("❌ Kanal o'chirish", callback_data="admin_del_ch")],
+        [InlineKeyboardButton("📢 Majburiy kanal qo'shish", callback_data="admin_add_ch"),
+         InlineKeyboardButton("❌ Majburiy kanal o'chirish", callback_data="admin_del_ch")],
         [InlineKeyboardButton("📣 Reklama tarqatish", callback_data="admin_broadcast"),
          InlineKeyboardButton("📊 Kodlar tahlili", callback_data="admin_code_analytics")],
         [InlineKeyboardButton("📚 Kinolar ro'yxati", callback_data="admin_list_movies"),
@@ -362,6 +410,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Deep link orqali kod
     kod = context.args[0].strip() if context.args else None
+    if kod:
+        if kod.startswith("kino_"):
+            kod = kod[5:]
+        elif kod.startswith("code_"):
+            kod = kod[5:]
+        kod = kod.strip()
 
     # Obuna tekshirish (faqat foydalanuvchilar uchun)
     if user.id not in ADMIN_IDS and cached_data.get("majburiy_kanallar"):
@@ -536,6 +590,76 @@ async def send_episode(update: Update, context: ContextTypes.DEFAULT_TYPE, movie
         await status.edit_text("❌ Xatolik yuz berdi. Video o'chirilgan bo'lishi mumkin.")
 
 # ============= MATN HANDLER =============
+async def send_promo_to_channel(context, admin_user, kod, text_or_caption="", photo=None, video=None, animation=None):
+    movie = await get_movie(kod)
+    m_desc = movie.get("desc", "🎬 Yangi Premyera") if movie else "🎬 Yangi Premyera"
+    
+    caption_body = text_or_caption.strip() if text_or_caption and text_or_caption.lower() != "avto" else ""
+    if caption_body:
+        post_text = (
+            f"🎬 <b>{html.escape(m_desc)}</b>\n\n"
+            f"{html.escape(caption_body)}\n\n"
+            f"🔢 <b>Kino kodi:</b> <code>{kod}</code>\n\n"
+            f"🍿 <b>Kinoni to'liq holda bot orqali tomosha qiling:</b>\n"
+            f"👇 Quyidagi tugmani bosing!"
+        )
+    else:
+        post_text = (
+            f"🎬 <b>{html.escape(m_desc)}</b>\n\n"
+            f"🔢 <b>Kino kodi:</b> <code>{kod}</code>\n\n"
+            f"🍿 <b>Kinoni to'liq holda bot orqali tomosha qiling:</b>\n"
+            f"👇 Quyidagi tugmani bosing!"
+        )
+    
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Kinoni ko'rish", url=f"{BOT_URL}?start={kod}")]
+    ])
+    
+    k_ch = cached_data.get("kino_kanal", {})
+    target_chat = k_ch.get("chat_id")
+    
+    success = False
+    if target_chat:
+        try:
+            t_id = int(target_chat) if (target_chat.startswith("-100") or target_chat.isdigit() or (target_chat.startswith("-") and target_chat[1:].isdigit())) else target_chat
+            if video:
+                await context.bot.send_video(chat_id=t_id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
+            elif photo:
+                await context.bot.send_photo(chat_id=t_id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
+            elif animation:
+                await context.bot.send_animation(chat_id=t_id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
+            else:
+                await context.bot.send_message(chat_id=t_id, text=post_text, parse_mode="HTML", reply_markup=kb)
+            success = True
+        except Exception as e:
+            logger.error(f"Kanalga post yuborishda xato: {e}")
+            await context.bot.send_message(chat_id=admin_user.id, text=f"⚠️ Kanalga yuborishda xatolik: {e}")
+    
+    if success:
+        c_title = k_ch.get("title", "Kino Kanali")
+        await context.bot.send_message(
+            chat_id=admin_user.id,
+            text=f"✅ Reklama posti <b>{html.escape(c_title)}</b> kanaliga muvaffaqiyatli joylandi! 🚀",
+            parse_mode="HTML",
+            reply_markup=admin_keyboard()
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=admin_user.id,
+            text=(
+                f"ℹ️ <b>Tayyor post namunasi:</b>\n"
+                f"<i>(Rasmiy kanal ulanmaganligi uchun post sizga yuborildi. Uni kanalingizga forward qilishingiz mumkin yoki Admin paneldan '📢 Rasmiy Kino Kanal' ni ulang)</i>"
+            ),
+            parse_mode="HTML"
+        )
+        if video:
+            await context.bot.send_video(chat_id=admin_user.id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
+        elif photo:
+            await context.bot.send_photo(chat_id=admin_user.id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await context.bot.send_message(chat_id=admin_user.id, text=post_text, parse_mode="HTML", reply_markup=kb)
+        await context.bot.send_message(chat_id=admin_user.id, text="👑 Admin Panel:", reply_markup=admin_keyboard())
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -556,24 +680,67 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ `{text}` kodli kino topilmadi.", parse_mode="Markdown", reply_markup=admin_keyboard())
             return
 
-        elif state == "WAIT_CH_ID":
-            await set_state(user.id, "WAIT_CH_URL", {"ch_id": text})
-            await update.message.reply_text("2️⃣ Kanal invite linkini yuboring (masalan: `https://t.me/kanal`):")
-            return
-
-        elif state == "WAIT_CH_URL":
-            await set_state(user.id, "WAIT_CH_NAME", {**sdata, "ch_url": text})
-            await update.message.reply_text("3️⃣ Tugmada chiqadigan nomni yuboring (masalan: `🎬 Kino Kanal`):")
-            return
-
-        elif state == "WAIT_CH_NAME":
-            new_ch = {"chat_id": sdata.get("ch_id"), "url": sdata.get("ch_url"), "name": text}
-            cached_data["majburiy_kanallar"].append(new_ch)
+        elif state == "WAIT_CH_INPUT":
+            ch_data, err = await resolve_channel_info(context, update.message, text)
+            if err:
+                await update.message.reply_text(f"❌ {err}\n\nIltimos, qayta urinib ko'ring yoki /cancel deb yozing:", parse_mode="HTML")
+                return
+            cached_data.setdefault("majburiy_kanallar", []).append({
+                "chat_id": ch_data["chat_id"],
+                "url": ch_data["url"],
+                "name": ch_data["title"]
+            })
             await save_config()
             global last_config_load
-            last_config_load = 0 # Keshni yangilashga majburlash
+            last_config_load = 0
             await set_state(user.id, None)
-            await update.message.reply_text(f"✅ Kanal qo'shildi: *{text}*", parse_mode="Markdown", reply_markup=admin_keyboard())
+            await update.message.reply_text(
+                f"✅ <b>{html.escape(ch_data['title'])}</b> kanali muvaffaqiyatli majburiy obunaga qo'shildi!\n"
+                f"Bot adminligi tasdiqlandi. 🚀",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard()
+            )
+            return
+
+        elif state == "WAIT_KINO_CH_INPUT":
+            ch_data, err = await resolve_channel_info(context, update.message, text)
+            if err:
+                await update.message.reply_text(f"❌ {err}\n\nIltimos, qayta urinib ko'ring yoki /cancel deb yozing:", parse_mode="HTML")
+                return
+            cached_data["kino_kanal"] = ch_data
+            await save_config()
+            await set_state(user.id, None)
+            await update.message.reply_text(
+                f"✅ <b>{html.escape(ch_data['title'])}</b> rasmiy kino kanali sifatida ulandi!\n\n"
+                f"Endi har bir kinoni reklama posti va <code>[Kinoni ko'rish]</code> tugmasi bilan kanalga yuborishingiz mumkin.",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard()
+            )
+            return
+
+        elif state == "WAIT_POST_CODE":
+            p_kod = text.strip()
+            movie = await get_movie(p_kod)
+            if not movie:
+                await update.message.reply_text(f"❌ <code>{p_kod}</code> kodi bo'yicha kino topilmadi. Qayta kiriting:", parse_mode="HTML")
+                return
+            await set_state(user.id, "WAIT_POST_MEDIA", {"kod": p_kod})
+            await update.message.reply_text(
+                f"📢 <b>{p_kod} kodli kino uchun kanalga reklama posti:</b>\n\n"
+                f"Quyidagilardan birini yuboring:\n"
+                f"📹 <b>Qisqa treyler / video</b> (izohi bilan birga)\n"
+                f"🖼 <b>Poster / rasm</b> (izohi bilan birga)\n"
+                f"📝 <b>Reklama matni</b>\n"
+                f"⚡ Yoki shunchaki <b>Avto</b> deb yozing\n\n"
+                f"<i>(Bekor qilish uchun /cancel)</i>",
+                parse_mode="HTML"
+            )
+            return
+
+        elif state == "WAIT_POST_MEDIA":
+            p_kod = sdata.get("kod")
+            await set_state(user.id, None)
+            await send_promo_to_channel(context, user, p_kod, text_or_caption=text)
             return
 
         elif state == "WAIT_MOVIE_CODE":
@@ -610,14 +777,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await complete_movie_save(context, user.id, msg_id, chat_id, m_kod, desc, m_part)
                 await set_state(user.id, None)
                 await status.delete()
+                kb_promo = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📢 Kanalga reklama posti chiqarish", callback_data=f"post_kino_{m_kod}")],
+                    [InlineKeyboardButton("👑 Admin Panel", callback_data="admin_back")]
+                ])
                 await update.message.reply_text(
                     f"✅ <b>{('Serial' if m_part > 1 else 'Kino')} muvaffaqiyatli saqlandi!</b>\n\n"
                     f"🔑 Kod: <code>{m_kod}</code>\n"
                     f"🔢 Qism: {m_part}\n"
                     f"📝 Nomi: {html.escape(desc)}\n\n"
-                    f"Ulangan kanallar va guruhlarga reklama posti joylandi! 📢",
+                    f"📢 Ushbu kino uchun kanalga reklama posti chiqarasizmi?",
                     parse_mode="HTML",
-                    reply_markup=admin_keyboard()
+                    reply_markup=kb_promo
                 )
             except Exception as e:
                 logger.error(f"Kino qadam-baqadam saqlashda xato: {e}")
@@ -708,54 +879,75 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============= BROADCAST FUNKSIYASI (MATN, RASM, VIDEO) =============
 async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_id = update.effective_user.id
+    _, sdata = await get_state(admin_id)
+    target = sdata.get("target", "all") if sdata else "all"
+
     status_msg = await update.message.reply_text("📣 Reklama tarqatish boshlandi...")
 
-    ok_gr = ok_usr = fail_gr = fail_usr = 0
+    ok_ch = ok_usr = fail_ch = fail_usr = 0
 
-    # 1. Guruhlarga
-    for cid in list(cached_data.get("guruhlar", [])):
-        try:
-            await context.bot.copy_message(
-                chat_id=int(cid),
-                from_chat_id=update.message.chat_id,
-                message_id=update.message.message_id
-            )
-            ok_gr += 1
-            await asyncio.sleep(0.3)
-        except Exception:
-            fail_gr += 1
+    # 1. Kanallar va guruhlarga
+    if target in ["channels", "all"]:
+        channel_targets = set()
+        for cid in list(cached_data.get("guruhlar", [])):
+            channel_targets.add(str(cid))
+        k_ch = cached_data.get("kino_kanal", {})
+        if k_ch.get("chat_id"):
+            channel_targets.add(str(k_ch.get("chat_id")))
+        for ch in cached_data.get("majburiy_kanallar", []):
+            if ch.get("chat_id"):
+                channel_targets.add(str(ch.get("chat_id")))
+
+        for cid in channel_targets:
+            try:
+                target_id = int(cid) if (cid.startswith("-100") or cid.isdigit() or (cid.startswith("-") and cid[1:].isdigit())) else cid
+                await context.bot.copy_message(
+                    chat_id=target_id,
+                    from_chat_id=update.message.chat_id,
+                    message_id=update.message.message_id
+                )
+                ok_ch += 1
+                await asyncio.sleep(0.3)
+            except Exception:
+                fail_ch += 1
 
     # 2. Foydalanuvchilarga
-    users_to_send = set()
-    for uid in cached_data.get("foydalanuvchilar", {}).keys():
-        users_to_send.add(str(uid))
+    if target in ["users", "all"]:
+        users_to_send = set()
+        for uid in cached_data.get("foydalanuvchilar", {}).keys():
+            users_to_send.add(str(uid))
 
-    if users_col is not None:
-        try:
-            cursor = users_col.find({}, {"_id": 1})
-            async for user_doc in cursor:
-                users_to_send.add(str(user_doc["_id"]))
-        except Exception as e:
-            logger.error(f"Broadcast user list error: {e}")
+        if users_col is not None:
+            try:
+                cursor = users_col.find({}, {"_id": 1})
+                async for user_doc in cursor:
+                    users_to_send.add(str(user_doc["_id"]))
+            except Exception as e:
+                logger.error(f"Broadcast user list error: {e}")
 
-    for uid in users_to_send:
-        try:
-            await context.bot.copy_message(
-                chat_id=int(uid),
-                from_chat_id=update.message.chat_id,
-                message_id=update.message.message_id
-            )
-            ok_usr += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            fail_usr += 1
+        for uid in users_to_send:
+            try:
+                await context.bot.copy_message(
+                    chat_id=int(uid),
+                    from_chat_id=update.message.chat_id,
+                    message_id=update.message.message_id
+                )
+                ok_usr += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                fail_usr += 1
 
-    await status_msg.edit_text(
+    t_title = "👤 Foydalanuvchilarga" if target == "users" else ("📢 Kanal va guruhlarga" if target == "channels" else "🚀 Barchaga")
+    res_text = (
         f"📣 <b>Reklama muvaffaqiyatli yakunlandi!</b>\n\n"
-        f"👥 Foydalanuvchilar: <b>{ok_usr}</b> ta (Xato: {fail_usr})\n"
-        f"🏢 Guruhlar: <b>{ok_gr}</b> ta (Xato: {fail_gr})",
-        parse_mode="HTML"
+        f"🎯 Auditoriya: <b>{t_title}</b>\n"
     )
+    if target in ["users", "all"]:
+        res_text += f"👥 Foydalanuvchilar: <b>{ok_usr}</b> ta (Xato: {fail_usr})\n"
+    if target in ["channels", "all"]:
+        res_text += f"📢 Kanallar va guruhlar: <b>{ok_ch}</b> ta (Xato: {fail_ch})"
+
+    await status_msg.edit_text(res_text, parse_mode="HTML")
     await set_state(admin_id, None)
     await update.message.reply_text("👑 Admin Panel:", reply_markup=admin_keyboard())
 
@@ -800,6 +992,44 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     state, sdata = await get_state(user.id)
+    if state == "WAIT_CH_INPUT":
+        ch_data, err = await resolve_channel_info(context, update.message, "")
+        if err:
+            await update.message.reply_text(f"❌ {err}\n\nIltimos, qayta urinib ko'ring yoki /cancel deb yozing:", parse_mode="HTML")
+            return
+        cached_data.setdefault("majburiy_kanallar", []).append({
+            "chat_id": ch_data["chat_id"],
+            "url": ch_data["url"],
+            "name": ch_data["title"]
+        })
+        await save_config()
+        global last_config_load
+        last_config_load = 0
+        await set_state(user.id, None)
+        await update.message.reply_text(f"✅ <b>{html.escape(ch_data['title'])}</b> kanali majburiy obunaga qo'shildi!", parse_mode="HTML", reply_markup=admin_keyboard())
+        return
+
+    if state == "WAIT_KINO_CH_INPUT":
+        ch_data, err = await resolve_channel_info(context, update.message, "")
+        if err:
+            await update.message.reply_text(f"❌ {err}\n\nIltimos, qayta urinib ko'ring yoki /cancel deb yozing:", parse_mode="HTML")
+            return
+        cached_data["kino_kanal"] = ch_data
+        await save_config()
+        await set_state(user.id, None)
+        await update.message.reply_text(f"✅ <b>{html.escape(ch_data['title'])}</b> rasmiy kino kanali sifatida ulandi!", parse_mode="HTML", reply_markup=admin_keyboard())
+        return
+
+    if state == "WAIT_POST_MEDIA":
+        p_kod = sdata.get("kod")
+        caption = update.message.caption or ""
+        v = update.message.video.file_id if update.message.video else None
+        p = update.message.photo[-1].file_id if update.message.photo else None
+        a = update.message.animation.file_id if update.message.animation else None
+        await set_state(user.id, None)
+        await send_promo_to_channel(context, user, p_kod, text_or_caption=caption, photo=p, video=v, animation=a)
+        return
+
     # Agar admin reklama yuborayotgan bo'lsa (rasm, video yoki xabar)
     if state == "WAIT_AD_CONTENT":
         await do_broadcast(update, context)
@@ -964,10 +1194,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_movie(update, context, kod)
             else:
                 await q.edit_message_text("✅ Obuna tasdiqlandi! Kino kodini yuboring.")
-        elif ok == "error":
-            await q.message.reply_text("❌ Xatolik: Bot kanalda admin emas.")
         else:
-            await q.message.reply_text("❌ Hali obuna bo'lmadingiz!")
+            await q.message.reply_text("❌ Hali barcha kanallarga obuna bo'lmadingiz! Iltimos, yuqoridagi kanallarga a'zo bo'ling.")
         return
 
     # Foydalanuvchilar va umumiy tugmalar
@@ -1083,8 +1311,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("🗑 O'chirmoqchi bo'lgan kino *kodini* yuboring:", parse_mode="Markdown")
 
     elif cb == "admin_add_ch":
-        await set_state(uid, "WAIT_CH_ID")
-        await q.message.reply_text("1️⃣ Kanal ID yoki @username kiriting:")
+        await set_state(uid, "WAIT_CH_INPUT")
+        await q.message.reply_text(
+            "📢 <b>Majburiy obuna uchun kanal qo'shish:</b>\n\n"
+            "Kanalning <b>@username</b>ini kiriting yoki kanaldan bitta xabarni bu yerga <b>Forward</b> qiling:\n\n"
+            "<i>⚠️ Muhim: @kino_liive_bot kanalda Administrator bo'lishi shart!</i>",
+            parse_mode="HTML"
+        )
 
     elif cb == "admin_del_ch":
         kanallar = cached_data.get("majburiy_kanallar", [])
@@ -1095,13 +1328,85 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")])
         await q.message.reply_text("Qaysi kanalni o'chirasiz?", reply_markup=InlineKeyboardMarkup(rows))
 
+    elif cb == "admin_kino_channel":
+        k_ch = cached_data.get("kino_kanal", {})
+        c_title = k_ch.get("title", "Ulanmagan")
+        c_user = f"@{k_ch.get('username')}" if k_ch.get("username") else k_ch.get("chat_id", "Yo'q")
+        txt = (
+            f"📢 <b>Rasmiy Kino Kanal:</b>\n\n"
+            f"🎬 Ulangan kanal: <b>{html.escape(c_title)}</b> ({c_user})\n\n"
+            f"Ushbu kanalga kinolar reklama posti (treyler) va <code>[🎬 Kinoni ko'rish]</code> tugmasi bilan avtomatik joylanishi mumkin."
+        )
+        btns = [
+            [InlineKeyboardButton("➕ Yangi kanal ulash", callback_data="admin_set_kino_channel")],
+        ]
+        if k_ch.get("chat_id"):
+            btns.append([InlineKeyboardButton("🗑 Kanalni uzish", callback_data="admin_del_kino_channel")])
+        btns.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")])
+        await q.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
+
+    elif cb == "admin_set_kino_channel":
+        await set_state(uid, "WAIT_KINO_CH_INPUT")
+        await q.message.reply_text(
+            "📢 <b>Rasmiy Kino Kanalini ulash:</b>\n\n"
+            "Kanal <b>@username</b>ini kiriting yoki kanaldan istalgan bir postni bu yerga <b>Forward</b> qiling:\n\n"
+            "<i>⚠️ Muhim: @kino_liive_bot kanalda Administrator bo'lishi shart!</i>",
+            parse_mode="HTML"
+        )
+
+    elif cb == "admin_del_kino_channel":
+        cached_data["kino_kanal"] = {}
+        await save_config()
+        await q.message.reply_text("✅ Rasmiy kino kanali uzildi.", reply_markup=admin_keyboard())
+
+    elif cb == "admin_post_to_channel":
+        await set_state(uid, "WAIT_POST_CODE")
+        await q.message.reply_text(
+            "📢 <b>Kanalga post chiqarish:</b>\n\n"
+            "Qaysi kino uchun post chiqarmoqchisiz? Kino <b>kodini</b> kiriting (masalan: <code>284</code>):",
+            parse_mode="HTML"
+        )
+
+    elif cb.startswith("post_kino_"):
+        p_kod = cb.replace("post_kino_", "").strip()
+        movie = await get_movie(p_kod)
+        if not movie:
+            await q.message.reply_text("❌ Kino topilmadi.", reply_markup=admin_keyboard())
+            return
+        await set_state(uid, "WAIT_POST_MEDIA", {"kod": p_kod})
+        await q.message.reply_text(
+            f"📢 <b>{p_kod} kodli kino uchun kanalga reklama posti:</b>\n\n"
+            f"Quyidagilardan birini yuboring:\n"
+            f"📹 <b>Qisqa treyler / video</b> (izohi bilan birga)\n"
+            f"🖼 <b>Poster / rasm</b> (izohi bilan birga)\n"
+            f"📝 <b>Reklama matni</b>\n"
+            f"⚡ Yoki shunchaki <b>Avto</b> deb yuboring\n\n"
+            f"<i>(Bekor qilish uchun /cancel)</i>",
+            parse_mode="HTML"
+        )
+
     elif cb == "admin_broadcast":
-        await set_state(uid, "WAIT_AD_CONTENT")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👤 Faqat bot foydalanuvchilariga", callback_data="ad_target_users")],
+            [InlineKeyboardButton("📢 Ulangan kanal va guruhlarga", callback_data="ad_target_channels")],
+            [InlineKeyboardButton("🚀 Barchaga (Foydalanuvchilar + Kanallar)", callback_data="ad_target_all")],
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")]
+        ])
         await q.message.reply_text(
             "📣 <b>Reklama tarqatish:</b>\n\n"
-            "Barcha foydalanuvchilar va guruhlarga yubormoqchi bo'lgan xabaringizni yuboring.\n\n"
-            "💡 <b>Xabar turi:</b> Matn, rasm yoki video (izohi bilan birga) yuborishingiz mumkin!\n"
-            "<i>(Bekor qilish uchun /cancel yozing)</i>",
+            "Reklamani qayerga yubormoqchisiz? Tanlang:",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+
+    elif cb in ["ad_target_users", "ad_target_channels", "ad_target_all"]:
+        target = "users" if cb == "ad_target_users" else ("channels" if cb == "ad_target_channels" else "all")
+        t_name = "👤 Faqat bot foydalanuvchilariga" if target == "users" else ("📢 Kanal va guruhlarga" if target == "channels" else "🚀 Barchaga")
+        await set_state(uid, "WAIT_AD_CONTENT", {"target": target})
+        await q.message.reply_text(
+            f"🎯 <b>Tanlangan auditoriya:</b> {t_name}\n\n"
+            f"Endi tarqatmoqchi bo'lgan reklama xabaringizni yuboring (matn, rasm yoki video):\n\n"
+            f"<i>(Bekor qilish uchun /cancel)</i>",
             parse_mode="HTML"
         )
 
