@@ -154,6 +154,7 @@ async def save_config():
         "guruhlar": cached_data.get("guruhlar", []),
         "majburiy_kanallar": cached_data.get("majburiy_kanallar", []),
         "kino_kanal": cached_data.get("kino_kanal", {}),
+        "promo_targets": cached_data.get("promo_targets", []),
         "storage_channel_id": cached_data.get("storage_channel_id", STORAGE_CHANNEL_ID),
         "statistika": cached_data.get("statistika", {}),
         "kinolar": cached_data.get("kinolar", {}),
@@ -414,8 +415,17 @@ async def post_init(application: Application) -> None:
         except Exception as e:
             logger.warning(f"MongoDB-ga ulanib bo'lmadi: {e}")
         
-    await load_data()
-    # Asosiy promo guruhni (-1001544552911) doimiy guruhlar safiga biriktiramiz
+        await load_data()
+    # Asosiy promo guruhni (-1001544552911) promo_targets safiga kiritamiz
+    pts = cached_data.setdefault("promo_targets", [])
+    if not any(str(p.get("chat_id")) == str(DEFAULT_PROMO_GROUP) for p in pts):
+        pts.append({
+            "chat_id": str(DEFAULT_PROMO_GROUP),
+            "title": "Kino live",
+            "username": "",
+            "type": "supergroup"
+        })
+        await save_config()
     if str(DEFAULT_PROMO_GROUP) not in [str(x) for x in cached_data.get("guruhlar", [])]:
         cached_data.setdefault("guruhlar", []).append(str(DEFAULT_PROMO_GROUP))
         await save_config()
@@ -471,7 +481,16 @@ async def register_user(user):
 
 async def check_subscription(user_id, bot):
     await load_data()
-    # Asosiy promo guruhni (-1001544552911) doimiy guruhlar safiga biriktiramiz
+    # Asosiy promo guruhni (-1001544552911) promo_targets safiga kiritamiz
+    pts = cached_data.setdefault("promo_targets", [])
+    if not any(str(p.get("chat_id")) == str(DEFAULT_PROMO_GROUP) for p in pts):
+        pts.append({
+            "chat_id": str(DEFAULT_PROMO_GROUP),
+            "title": "Kino live",
+            "username": "",
+            "type": "supergroup"
+        })
+        await save_config()
     if str(DEFAULT_PROMO_GROUP) not in [str(x) for x in cached_data.get("guruhlar", [])]:
         cached_data.setdefault("guruhlar", []).append(str(DEFAULT_PROMO_GROUP))
         await save_config()
@@ -493,6 +512,40 @@ async def check_subscription(user_id, bot):
             # Bot admin bo'lmagan yoki xato kanallar sababli foydalanuvchini bloklamaymiz
             continue
     return True
+
+
+async def resolve_any_chat(context, message, raw_text=""):
+    """Kanal yoki guruhni forward, @username, link yoki ID orqali aniqlaydi (Adminlik shart emas)"""
+    chat_target = None
+    if getattr(message, "forward_origin", None) and hasattr(message.forward_origin, "chat"):
+        chat_target = message.forward_origin.chat.id
+    elif message.forward_from_chat:
+        chat_target = message.forward_from_chat.id
+    else:
+        raw = raw_text.strip() if raw_text else ""
+        if not raw and message.caption:
+            raw = message.caption.strip()
+        
+        if "t.me/" in raw:
+            raw = raw.split("t.me/")[-1].replace("+", "").strip("/")
+            if not raw.startswith("@") and not raw.startswith("-100"):
+                raw = "@" + raw
+        elif not raw.startswith("@") and not raw.startswith("-100") and not raw.isdigit():
+            raw = "@" + raw
+        chat_target = int(raw) if (raw.startswith("-100") or (raw.startswith("-") and raw[1:].isdigit())) else raw
+
+    try:
+        chat = await context.bot.get_chat(chat_target)
+        link = f"https://t.me/{chat.username}" if chat.username else BOT_URL
+        return {
+            "chat_id": str(chat.id),
+            "title": chat.title or "Guruh/Kanal",
+            "username": chat.username or "",
+            "type": chat.type,
+            "url": link
+        }, None
+    except Exception as e:
+        return None, f"Kanal/Guruh topilmadi: {e}"
 
 async def resolve_channel_info(context, message, raw_text=""):
     """Kanalni forward, @username, link yoki ID orqali aniqlaydi va bot adminligini tekshiradi"""
@@ -836,11 +889,15 @@ async def send_episode(update: Update, context: ContextTypes.DEFAULT_TYPE, movie
 async def send_promo_to_channel(context, admin_user, kod, text_or_caption="", photo=None, video=None, animation=None):
     movie = await get_movie(kod)
     m_desc = movie.get("desc", "🎬 Yangi Premyera") if movie else "🎬 Yangi Premyera"
+    clean_desc = m_desc.split("\n")[0]
+    eps = movie.get("episodes", []) if movie else []
+    ep_count = len(eps)
     
+    extra = f"\n🔢 <b>Qismlar soni:</b> {ep_count} ta qism" if ep_count > 1 else ""
     caption_body = text_or_caption.strip() if text_or_caption and text_or_caption.lower() != "avto" else ""
     if caption_body:
         post_text = (
-            f"🎬 <b>{html.escape(m_desc)}</b>\n\n"
+            f"🎬 <b>{html.escape(clean_desc)}</b>{extra}\n\n"
             f"{html.escape(caption_body)}\n\n"
             f"🔢 <b>Kino kodi:</b> <code>{kod}</code>\n\n"
             f"🍿 <b>Kinoni to'liq holda bot orqali tomosha qiling:</b>\n"
@@ -848,7 +905,7 @@ async def send_promo_to_channel(context, admin_user, kod, text_or_caption="", ph
         )
     else:
         post_text = (
-            f"🎬 <b>{html.escape(m_desc)}</b>\n\n"
+            f"🎬 <b>{html.escape(clean_desc)}</b>{extra}\n\n"
             f"🔢 <b>Kino kodi:</b> <code>{kod}</code>\n\n"
             f"🍿 <b>Kinoni to'liq holda bot orqali tomosha qiling:</b>\n"
             f"👇 Quyidagi tugmani bosing!"
@@ -858,75 +915,85 @@ async def send_promo_to_channel(context, admin_user, kod, text_or_caption="", ph
         [InlineKeyboardButton("🎬 Kinoni ko'rish", url=f"{BOT_URL}?start={kod}")]
     ])
     
-    # 1. Avval asosiy guruhga (-1001544552911) 100% yuboramiz!
-    promo_success = False
-    try:
-        t_id = DEFAULT_PROMO_GROUP
-        if video:
-            await context.bot.send_video(chat_id=t_id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
-        elif photo:
-            await context.bot.send_photo(chat_id=t_id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
-        elif animation:
-            await context.bot.send_animation(chat_id=t_id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
-        else:
-            await context.bot.send_message(chat_id=t_id, text=post_text, parse_mode="HTML", reply_markup=kb)
-        promo_success = True
-    except Exception as e:
-        logger.warning(f"Guruhga (-1001544552911) tugmali post yuborishda xato: {e}")
+    # Barcha ulangan kanal va guruhlar ro'yxatini olamiz
+    targets = []
+    seen_ids = set()
+    for p in cached_data.get("promo_targets", []):
+        cid = str(p.get("chat_id"))
+        if cid not in seen_ids:
+            seen_ids.add(cid)
+            targets.append(p)
+            
+    # Agar -1001544552911 ro'yxatda bo'lmasa qo'shamiz
+    if str(DEFAULT_PROMO_GROUP) not in seen_ids:
+        targets.append({"chat_id": str(DEFAULT_PROMO_GROUP), "title": "Kino live"})
+    
+    success_names = []
+    failed_names = []
+    
+    for t in targets:
+        cid = t.get("chat_id")
+        title = t.get("title", cid)
+        target_id = int(cid) if (str(cid).startswith("-") or str(cid).isdigit()) else cid
+        sent = False
+        
+        # 1. Avval [🎬 Kinoni ko'rish] inline tugmasi bilan urinib ko'ramiz
         try:
-            # Inline button siz qayta urinish (oddiy havola bilan)
-            t_id = DEFAULT_PROMO_GROUP
-            plain_post = f"{post_text}\n\n👉 {BOT_URL}?start={kod}"
             if video:
-                await context.bot.send_video(chat_id=t_id, video=video, caption=plain_post, parse_mode="HTML")
+                await context.bot.send_video(chat_id=target_id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
             elif photo:
-                await context.bot.send_photo(chat_id=t_id, photo=photo, caption=plain_post, parse_mode="HTML")
-            else:
-                await context.bot.send_message(chat_id=t_id, text=plain_post, parse_mode="HTML")
-            promo_success = True
-        except Exception as err2:
-            logger.error(f"Guruhga (-1001544552911) post yuborishda xato: {err2}")
-            await context.bot.send_message(chat_id=admin_user.id, text=f"⚠️ Guruhga (-1001544552911) yuborishda xatolik: {err2}\n\nEslatma: Bot ushbu guruhga qo'shilganligini tekshiring!")
-
-    # 2. Agar rasmiy kino kanal ulangan bo'lsa, unga ham yuboramiz
-    k_ch = cached_data.get("kino_kanal", {})
-    target_chat = k_ch.get("chat_id")
-    if target_chat and str(target_chat) != str(DEFAULT_PROMO_GROUP):
-        try:
-            t_id = int(target_chat) if (str(target_chat).startswith("-") or str(target_chat).isdigit()) else target_chat
-            if video:
-                await context.bot.send_video(chat_id=t_id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
-            elif photo:
-                await context.bot.send_photo(chat_id=t_id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
+                await context.bot.send_photo(chat_id=target_id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
             elif animation:
-                await context.bot.send_animation(chat_id=t_id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
+                await context.bot.send_animation(chat_id=target_id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
             else:
-                await context.bot.send_message(chat_id=t_id, text=post_text, parse_mode="HTML", reply_markup=kb)
+                await context.bot.send_message(chat_id=target_id, text=post_text, parse_mode="HTML", reply_markup=kb)
+            sent = True
         except Exception as e:
-            logger.warning(f"Rasmiy kanalga yuborishda xato: {e}")
+            logger.warning(f"Tugmali post yuborishda xato ({title}): {e}, tugmasiz havolali yuboramiz...")
+            # 2. Agar guruhda inline tugmaga ruxsat bo'lmasa, oddiy havolali xabar bilan yuboramiz
+            try:
+                plain_post = f"{post_text}\n\n👉 {BOT_URL}?start={kod}"
+                if video:
+                    await context.bot.send_video(chat_id=target_id, video=video, caption=plain_post, parse_mode="HTML")
+                elif photo:
+                    await context.bot.send_photo(chat_id=target_id, photo=photo, caption=plain_post, parse_mode="HTML")
+                elif animation:
+                    await context.bot.send_animation(chat_id=target_id, animation=animation, caption=plain_post, parse_mode="HTML")
+                else:
+                    await context.bot.send_message(chat_id=target_id, text=plain_post, parse_mode="HTML")
+                sent = True
+            except Exception as e2:
+                logger.error(f"Post yuborishda xato ({title}): {e2}")
+                failed_names.append(f"{title} ({e2})")
 
-    # Adminga tasdiq xabari
-    if promo_success:
+        if sent:
+            success_names.append(title)
+        await asyncio.sleep(0.3)
+        
+    if success_names:
+        s_list = "\n".join([f"🔹 <b>{html.escape(s)}</b>" for s in success_names])
         await context.bot.send_message(
             chat_id=admin_user.id,
-            text=f"✅ Reklama posti <b>-1001544552911</b> guruhiga muvaffaqiyatli joylandi! 🚀",
+            text=f"✅ <b>Post muvaffaqiyatli joylandi!</b> 🚀\n\nQuyidagi manzil(lar)ga yetkazildi:\n{s_list}",
             parse_mode="HTML",
             reply_markup=admin_keyboard()
         )
     else:
-        # Namuna sifatida adminga yuboramiz
+        err_msg = "\n".join(failed_names) if failed_names else "Noma'lum xatolik"
         await context.bot.send_message(
             chat_id=admin_user.id,
-            text="ℹ️ <b>Tayyor post namunasi:</b>\n<i>(Guruhga yuborib bo'lmadi. Bot guruhga a'zo qilinganini tekshiring)</i>",
+            text=f"⚠️ <b>Postni yuborib bo'lmadi:</b>\n{err_msg}\n\nPost sizga namuna qilib yuborildi:",
             parse_mode="HTML"
         )
         if video:
             await context.bot.send_video(chat_id=admin_user.id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
         elif photo:
             await context.bot.send_photo(chat_id=admin_user.id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
+        elif animation:
+            await context.bot.send_animation(chat_id=admin_user.id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
         else:
             await context.bot.send_message(chat_id=admin_user.id, text=post_text, parse_mode="HTML", reply_markup=kb)
-        await context.bot.send_message(chat_id=admin_user.id, text="👑 Admin Panel:", reply_markup=admin_keyboard())
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -986,20 +1053,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        elif state == "WAIT_KINO_CH_INPUT":
-            ch_data, err = await resolve_channel_info(context, update.message, text)
+        elif state == "WAIT_PROMO_TARGET_INPUT" or state == "WAIT_KINO_CH_INPUT":
+            ch_data, err = await resolve_any_chat(context, update.message, text)
             if err:
                 await update.message.reply_text(f"❌ {err}\n\nIltimos, qayta urinib ko'ring yoki /cancel deb yozing:", parse_mode="HTML")
                 return
-            cached_data["kino_kanal"] = ch_data
-            await save_config()
-            await set_state(user.id, None)
-            await update.message.reply_text(
-                f"✅ <b>{html.escape(ch_data['title'])}</b> rasmiy kino kanali sifatida ulandi!\n\n"
-                f"Endi har bir kinoni reklama posti va <code>[Kinoni ko'rish]</code> tugmasi bilan kanalga yuborishingiz mumkin.",
-                parse_mode="HTML",
-                reply_markup=admin_keyboard()
-            )
+            
+            pts = cached_data.setdefault("promo_targets", [])
+            if any(str(p.get("chat_id")) == str(ch_data["chat_id"]) for p in pts):
+                await update.message.reply_text(f"⚠️ <b>{html.escape(ch_data['title'])}</b> allaqachon ulangan!", parse_mode="HTML", reply_markup=admin_keyboard())
+            else:
+                pts.append(ch_data)
+                await save_config()
+                await set_state(user.id, None)
+                await update.message.reply_text(
+                    f"✅ <b>{html.escape(ch_data['title'])}</b> muvaffaqiyatli ulandi! 🚀\n"
+                    f"ID: <code>{ch_data['chat_id']}</code>\n\n"
+                    f"Endi post chiqarganingizda ushbu manzilga <b>[🎬 Kinoni ko'rish]</b> tugmasi bilan boradi!",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard()
+                )
             return
 
         elif state == "WAIT_STORAGE_CH":
@@ -1368,15 +1441,25 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ <b>{html.escape(ch_data['title'])}</b> kanali majburiy obunaga qo'shildi!", parse_mode="HTML", reply_markup=admin_keyboard())
         return
 
-    if state == "WAIT_KINO_CH_INPUT":
-        ch_data, err = await resolve_channel_info(context, update.message, "")
+    if state == "WAIT_PROMO_TARGET_INPUT" or state == "WAIT_KINO_CH_INPUT":
+        ch_data, err = await resolve_any_chat(context, update.message, "")
         if err:
             await update.message.reply_text(f"❌ {err}\n\nIltimos, qayta urinib ko'ring yoki /cancel deb yozing:", parse_mode="HTML")
             return
-        cached_data["kino_kanal"] = ch_data
-        await save_config()
-        await set_state(user.id, None)
-        await update.message.reply_text(f"✅ <b>{html.escape(ch_data['title'])}</b> rasmiy kino kanali sifatida ulandi!", parse_mode="HTML", reply_markup=admin_keyboard())
+        pts = cached_data.setdefault("promo_targets", [])
+        if any(str(p.get("chat_id")) == str(ch_data["chat_id"]) for p in pts):
+            await update.message.reply_text(f"⚠️ <b>{html.escape(ch_data['title'])}</b> allaqachon ulangan!", parse_mode="HTML", reply_markup=admin_keyboard())
+        else:
+            pts.append(ch_data)
+            await save_config()
+            await set_state(user.id, None)
+            await update.message.reply_text(
+                f"✅ <b>{html.escape(ch_data['title'])}</b> muvaffaqiyatli ulandi! 🚀\n"
+                f"ID: <code>{ch_data['chat_id']}</code>\n\n"
+                f"Endi post chiqarganingizda ushbu manzilga <b>[🎬 Kinoni ko'rish]</b> tugmasi bilan boradi!",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard()
+            )
         return
 
     if state == "WAIT_STORAGE_CH":
@@ -1852,35 +1935,53 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Qaysi kanalni o'chirasiz?", reply_markup=InlineKeyboardMarkup(rows))
 
     elif cb == "admin_kino_channel":
-        k_ch = cached_data.get("kino_kanal", {})
-        c_title = k_ch.get("title", "Ulanmagan")
-        c_user = f"@{k_ch.get('username')}" if k_ch.get("username") else k_ch.get("chat_id", "Yo'q")
-        txt = (
-            f"📢 <b>Rasmiy Kino Kanal:</b>\n\n"
-            f"🎬 Ulangan kanal: <b>{html.escape(c_title)}</b> ({c_user})\n\n"
-            f"Ushbu kanalga kinolar reklama posti (treyler) va <code>[🎬 Kinoni ko'rish]</code> tugmasi bilan avtomatik joylanishi mumkin."
+        pts = cached_data.get("promo_targets", [])
+        txt = "📢 <b>Ulangan Rasmiy Kanallar va Guruhlar:</b>\n\n"
+        if pts:
+            txt += "Hozir post chiqadigan manzillar:\n"
+            for i, p in enumerate(pts, 1):
+                c_user = f"(@{p.get('username')})" if p.get('username') else f"(ID: <code>{p.get('chat_id')}</code>)"
+                txt += f"{i}. <b>{html.escape(p.get('title', 'Kanal/Guruh'))}</b> {c_user}\n"
+        else:
+            txt += "<i>Hozircha hech qanday kanal yoki guruh ulanmagan.</i>\n"
+        
+        txt += (
+            "\n💡 <i>Bu yerga ulangan barcha kanal va guruhlarga reklama postlari "
+            "va <b>[🎬 Kinoni ko'rish]</b> tugmasi bilan bir vaqtda chiqadi!</i>"
         )
+        
         btns = [
-            [InlineKeyboardButton("➕ Yangi kanal ulash", callback_data="admin_set_kino_channel")],
+            [InlineKeyboardButton("➕ Yangi Kanal yoki Guruh ulash", callback_data="promo_add_target")]
         ]
-        if k_ch.get("chat_id"):
-            btns.append([InlineKeyboardButton("🗑 Kanalni uzish", callback_data="admin_del_kino_channel")])
+        for idx, p in enumerate(pts):
+            p_title = p.get('title', f"ID: {p.get('chat_id')}")[:20]
+            btns.append([InlineKeyboardButton(f"❌ {p_title} ni uzish", callback_data=f"promo_del_target_{idx}")])
         btns.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")])
         await q.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
+        return
 
-    elif cb == "admin_set_kino_channel":
-        await set_state(uid, "WAIT_KINO_CH_INPUT")
+    elif cb == "promo_add_target":
+        await set_state(uid, "WAIT_PROMO_TARGET_INPUT")
         await q.message.reply_text(
-            "📢 <b>Rasmiy Kino Kanalini ulash:</b>\n\n"
-            "Kanal <b>@username</b>ini kiriting yoki kanaldan istalgan bir postni bu yerga <b>Forward</b> qiling:\n\n"
-            "<i>⚠️ Muhim: @kino_liive_bot kanalda Administrator bo'lishi shart!</i>",
+            "📢 <b>Yangi Kanal yoki Guruh ulash:</b>\n\n"
+            "Quyidagilardan birini yuboring:\n"
+            "🔹 Kanal yoki guruh <b>@username</b>ini (masalan: <code>@kinolive</code>)\n"
+            "🔹 Guruh yoki kanal <b>havolasini (link)</b>\n"
+            "🔹 Guruh yoki kanal <b>ID raqamini</b> (masalan: <code>-1001544552911</code>)\n"
+            "🔹 Yoki o'sha kanaldan/guruhdan bir postni bu yerga <b>Forward</b> qiling!\n\n"
+            "<i>(Bot admin bo'lishi shart emas — oddiy a'zo bo'lsa ham qabul qilinadi!)</i>",
             parse_mode="HTML"
         )
+        return
 
-    elif cb == "admin_del_kino_channel":
-        cached_data["kino_kanal"] = {}
-        await save_config()
-        await q.message.reply_text("✅ Rasmiy kino kanali uzildi.", reply_markup=admin_keyboard())
+    elif cb.startswith("promo_del_target_"):
+        idx = int(cb.replace("promo_del_target_", ""))
+        pts = cached_data.get("promo_targets", [])
+        if 0 <= idx < len(pts):
+            removed = pts.pop(idx)
+            await save_config()
+            await q.message.reply_text(f"✅ <b>{html.escape(removed.get('title', 'Obyekt'))}</b> muvaffaqiyatli uzildi!", parse_mode="HTML", reply_markup=admin_keyboard())
+        return
 
     elif cb == "admin_storage_channel":
         s_ch = get_storage_channel_id()
