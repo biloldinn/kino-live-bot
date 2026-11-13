@@ -858,13 +858,42 @@ async def send_promo_to_channel(context, admin_user, kod, text_or_caption="", ph
         [InlineKeyboardButton("🎬 Kinoni ko'rish", url=f"{BOT_URL}?start={kod}")]
     ])
     
+    # 1. Avval asosiy guruhga (-1001544552911) 100% yuboramiz!
+    promo_success = False
+    try:
+        t_id = DEFAULT_PROMO_GROUP
+        if video:
+            await context.bot.send_video(chat_id=t_id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
+        elif photo:
+            await context.bot.send_photo(chat_id=t_id, photo=photo, caption=post_text, parse_mode="HTML", reply_markup=kb)
+        elif animation:
+            await context.bot.send_animation(chat_id=t_id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await context.bot.send_message(chat_id=t_id, text=post_text, parse_mode="HTML", reply_markup=kb)
+        promo_success = True
+    except Exception as e:
+        logger.warning(f"Guruhga (-1001544552911) tugmali post yuborishda xato: {e}")
+        try:
+            # Inline button siz qayta urinish (oddiy havola bilan)
+            t_id = DEFAULT_PROMO_GROUP
+            plain_post = f"{post_text}\n\n👉 {BOT_URL}?start={kod}"
+            if video:
+                await context.bot.send_video(chat_id=t_id, video=video, caption=plain_post, parse_mode="HTML")
+            elif photo:
+                await context.bot.send_photo(chat_id=t_id, photo=photo, caption=plain_post, parse_mode="HTML")
+            else:
+                await context.bot.send_message(chat_id=t_id, text=plain_post, parse_mode="HTML")
+            promo_success = True
+        except Exception as err2:
+            logger.error(f"Guruhga (-1001544552911) post yuborishda xato: {err2}")
+            await context.bot.send_message(chat_id=admin_user.id, text=f"⚠️ Guruhga (-1001544552911) yuborishda xatolik: {err2}\n\nEslatma: Bot ushbu guruhga qo'shilganligini tekshiring!")
+
+    # 2. Agar rasmiy kino kanal ulangan bo'lsa, unga ham yuboramiz
     k_ch = cached_data.get("kino_kanal", {})
     target_chat = k_ch.get("chat_id")
-    
-    success = False
-    if target_chat:
+    if target_chat and str(target_chat) != str(DEFAULT_PROMO_GROUP):
         try:
-            t_id = int(target_chat) if (target_chat.startswith("-100") or target_chat.isdigit() or (target_chat.startswith("-") and target_chat[1:].isdigit())) else target_chat
+            t_id = int(target_chat) if (str(target_chat).startswith("-") or str(target_chat).isdigit()) else target_chat
             if video:
                 await context.bot.send_video(chat_id=t_id, video=video, caption=post_text, parse_mode="HTML", reply_markup=kb)
             elif photo:
@@ -873,26 +902,22 @@ async def send_promo_to_channel(context, admin_user, kod, text_or_caption="", ph
                 await context.bot.send_animation(chat_id=t_id, animation=animation, caption=post_text, parse_mode="HTML", reply_markup=kb)
             else:
                 await context.bot.send_message(chat_id=t_id, text=post_text, parse_mode="HTML", reply_markup=kb)
-            success = True
         except Exception as e:
-            logger.error(f"Kanalga post yuborishda xato: {e}")
-            await context.bot.send_message(chat_id=admin_user.id, text=f"⚠️ Kanalga yuborishda xatolik: {e}")
-    
-    if success:
-        c_title = k_ch.get("title", "Kino Kanali")
+            logger.warning(f"Rasmiy kanalga yuborishda xato: {e}")
+
+    # Adminga tasdiq xabari
+    if promo_success:
         await context.bot.send_message(
             chat_id=admin_user.id,
-            text=f"✅ Reklama posti <b>{html.escape(c_title)}</b> kanaliga muvaffaqiyatli joylandi! 🚀",
+            text=f"✅ Reklama posti <b>-1001544552911</b> guruhiga muvaffaqiyatli joylandi! 🚀",
             parse_mode="HTML",
             reply_markup=admin_keyboard()
         )
     else:
+        # Namuna sifatida adminga yuboramiz
         await context.bot.send_message(
             chat_id=admin_user.id,
-            text=(
-                f"ℹ️ <b>Tayyor post namunasi:</b>\n"
-                f"<i>(Rasmiy kanal ulanmaganligi uchun post sizga yuborildi. Uni kanalingizga forward qilishingiz mumkin yoki Admin paneldan '📢 Rasmiy Kino Kanal' ni ulang)</i>"
-            ),
+            text="ℹ️ <b>Tayyor post namunasi:</b>\n<i>(Guruhga yuborib bo'lmadi. Bot guruhga a'zo qilinganini tekshiring)</i>",
             parse_mode="HTML"
         )
         if video:
