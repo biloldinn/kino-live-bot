@@ -415,6 +415,11 @@ async def post_init(application: Application) -> None:
             logger.warning(f"MongoDB-ga ulanib bo'lmadi: {e}")
         
     await load_data()
+    # Asosiy promo guruhni (-1001544552911) doimiy guruhlar safiga biriktiramiz
+    if str(DEFAULT_PROMO_GROUP) not in [str(x) for x in cached_data.get("guruhlar", [])]:
+        cached_data.setdefault("guruhlar", []).append(str(DEFAULT_PROMO_GROUP))
+        await save_config()
+        logger.info(f"Asosiy promo guruh ({DEFAULT_PROMO_GROUP}) ro'yxatga kiritildi.")
     if not _notified_admin:
         _notified_admin = True
         for aid in ADMIN_IDS:
@@ -466,6 +471,11 @@ async def register_user(user):
 
 async def check_subscription(user_id, bot):
     await load_data()
+    # Asosiy promo guruhni (-1001544552911) doimiy guruhlar safiga biriktiramiz
+    if str(DEFAULT_PROMO_GROUP) not in [str(x) for x in cached_data.get("guruhlar", [])]:
+        cached_data.setdefault("guruhlar", []).append(str(DEFAULT_PROMO_GROUP))
+        await save_config()
+        logger.info(f"Asosiy promo guruh ({DEFAULT_PROMO_GROUP}) ro'yxatga kiritildi.")
     kanallar = cached_data.get("majburiy_kanallar", [])
     if not kanallar:
         return True
@@ -487,9 +497,25 @@ async def check_subscription(user_id, bot):
 async def resolve_channel_info(context, message, raw_text=""):
     """Kanalni forward, @username, link yoki ID orqali aniqlaydi va bot adminligini tekshiradi"""
     chat_target = None
-    if message.forward_from_chat:
+    # 1. Telegram yangi forward_origin (Bot API 7.0+)
+    if getattr(message, "forward_origin", None) and hasattr(message.forward_origin, "chat"):
+        chat_target = message.forward_origin.chat.id
+    elif message.forward_from_chat:
         chat_target = message.forward_from_chat.id
     else:
+        raw = raw_text.strip() if raw_text else ""
+        # Agar xabar captionida bo'lsa
+        if not raw and message.caption:
+            raw = message.caption.strip()
+        
+        # Linklarni tozalash
+        if "t.me/" in raw:
+            raw = raw.split("t.me/")[-1].replace("+", "").strip("/")
+            if not raw.startswith("@") and not raw.startswith("-100"):
+                raw = "@" + raw
+        elif not raw.startswith("@") and not raw.startswith("-100") and not raw.isdigit():
+            raw = "@" + raw
+        chat_target = int(raw) if (raw.startswith("-100") or (raw.startswith("-") and raw[1:].isdigit())) else raw
         raw = raw_text.strip()
         if "t.me/" in raw:
             raw = raw.split("t.me/")[-1].replace("+", "").strip("/")
@@ -551,6 +577,16 @@ def admin_keyboard():
     ])
 
 # ============= START =============
+
+# ============= CANCEL KOMANDASI =============
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await set_state(user_id, None)
+    if user_id in ADMIN_IDS:
+        await update.message.reply_text("❌ Amal bekor qilindi.", reply_markup=admin_keyboard())
+    else:
+        await update.message.reply_text("❌ Amal bekor qilindi.")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
@@ -873,6 +909,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
     text = update.message.text.strip()
+    
+    # Bekor qilish komandasi
+    if text.lower() in ["/cancel", "cancel", "bekor", "bekor qilish"]:
+        await set_state(user.id, None)
+        if user.id in ADMIN_IDS:
+            await update.message.reply_text("❌ Amal bekor qilindi.", reply_markup=admin_keyboard())
+        else:
+            await update.message.reply_text("❌ Amal bekor qilindi.")
+        return
+
     state, sdata = await get_state(user.id)
 
     # ----- ADMIN HOLATLARI -----
@@ -1968,6 +2014,7 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_application():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(
